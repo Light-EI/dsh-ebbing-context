@@ -9,6 +9,7 @@
 import { DEFAULTS, NAME } from './lib/config.js'
 import { renderMap } from './lib/map.js'
 import { estimateTokens } from './lib/tokens.js'
+import { issue, forget } from './lib/license.js'
 import { readZones } from './lib/blocks.js'
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
@@ -48,11 +49,13 @@ export function apply(ctx, rawConfig = {}) {
   const overflowSaid = new Map() // agentId -> 上一次报超限发生在第几轮
 
   // 进程内状态只在会话活着时有意义：会话销毁就清掉，避免这两个表随会话数单调增长。
+  // 会话销毁时把许可证也清掉
   ctx.on('agent/disposed', (payload) => {
     const id = payload && payload.agent ? payload.agent.id : null
     if (!id) return
     reminded.delete(id)
     overflowSaid.delete(id)
+    forget(id)
   })
 
   ctx.effect(() => ctx.tools.register(contextMapTool(ctx, config)))
@@ -226,6 +229,9 @@ function contextMapTool(ctx, config) {
       if (blocked) return { text: blocked }
       const agent = requireAgent(ctx, exec)
       try {
+      // 发许可证：看过地图才允许压，而且这张地图只能用一次
+      const session = ctx.sessions.get(agent.id)
+      if (session) issue(agent.id, session)
       return { text: renderMap(ctx, agent, config).text }
     } catch (error) {
       return { text: '列地图时出错了：' + errText(error) }
