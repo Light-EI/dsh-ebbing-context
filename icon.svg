@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Infinity Context">
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161f"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- three stacked layers: top narrowest (oldest, most compressed) -->
+    <path d="M20 18h24" stroke="#7cc7ff" stroke-width="6"/>
+    <path d="M16 30h32" stroke="#4a9fe0" stroke-width="6"/>
+    <path d="M12 42h40" stroke="#2f6f9e" stroke-width="6"/>
+    <!-- a bar dropping out of the bottom layer: the raw tail stays untouched -->
+    <path d="M12 52h28" stroke="#9aa7b8" stroke-width="4" stroke-dasharray="4 6"/>
+  </g>
+</svg>

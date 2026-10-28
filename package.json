@@ -1,0 +1,36 @@
+{
+  "name": "dsh-infinity-context",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，只写宿主本来就认识的会话事件。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "dsh.bundle.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "cordis",
+    "dsh-bundle",
+    "cordis-plugin",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.bundle.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3"
+  },
+  "license": "MIT"
+}

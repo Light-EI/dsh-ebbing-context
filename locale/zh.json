@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Infinity Context",
+    "description": "让模型自己把旧对话折成分层摘要，只写宿主本来就认识的会话事件。"
+  }
+}
