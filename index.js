@@ -136,17 +136,19 @@ function remindIfNeeded(ctx, config, state, payload) {
     state.set(id, st)
   }
 
-  const grew = st.tokens === null ? 0 : usage.used - st.tokens
+  // 第一次见到这个会话就把"上一次提醒时的量"定为当前量，否则增长触发永远没有基线、开不了口。
+  if (st.tokens === null) st.tokens = usage.used
+  const grew = usage.used - st.tokens
   const reasons = []
   if (usage.ratio >= config.triggerPct && st.turn !== turn) reasons.push('line')
-  if (st.tokens !== null && grew >= config.notice.growthTokens) reasons.push('growth')
+  if (grew >= config.notice.growthTokens) reasons.push('growth')
 
   // 区超限每轮最多查一次：它要全量扫一遍日志，别每步都扫。
   let zoneOver = {}
   if (st.zonesTurn !== turn) {
     st.zonesTurn = turn
     // 区配额与触发线必须用同一个分母（可用输入预算），否则两套账。
-  zoneOver = readZoneOver(ctx, session, config, usage.budget)
+    zoneOver = readZoneOver(ctx, session, config, usage.budget)
     for (const key of ['l1', 'l2', 'l3']) {
       if (zoneOver[key] && !st.zones[key]) {
         st.zones[key] = true
@@ -188,6 +190,8 @@ function remindIfNeeded(ctx, config, state, payload) {
   // 这张地图是此刻现算的，比模型自己调工具拿到的更新。
   let mapText = ''
   try {
+    const s = ctx.sessions.get(payload.agent.id)
+    if (s) issue(payload.agent.id, s)
     mapText = '\n\n' + renderMap(ctx, payload.agent, config).text
   } catch {}
 
@@ -277,7 +281,10 @@ function compressTool(ctx, config, log) {
     }
       if (!result.ok) {
         log('compress-rejected', { reason: result.reason, keys: Object.keys(args || {}) })
-        return { text: `没能压缩：${result.reason}` }
+        const landed = Array.isArray(result.results) && result.results.length
+          ? `（已经写进去的：${result.results.map((r) => r.key).join('、')}；后面的没写）`
+          : ''
+        return { text: `没能压缩：${result.reason}${landed}` }
       }
       log('compress-ok', { keys: result.results.map((r) => r.key), prunedChars: result.prunedChars })
       const lines = result.results.map(
