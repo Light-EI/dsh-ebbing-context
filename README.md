@@ -61,3 +61,7 @@ DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，�
 ## 许可与出处
 
 MIT。插件里的检查点前导语（`This is an automatically generated checkpoint …`）与被压内容边界标签（`<compacted-summary>` / `</compacted-summary>`）的**文字**抄自 DSH 自带的 `@deepseek-ai/dsh-compaction-basic`（MIT），因为宿主界面与日志靠这段文字识别检查点，必须逐字节一致。除此之外没有复制任何代码。
+
+## 宿主禁忌（实测）
+
+不要为了让窗口更宽去改宿主 `agent-default-model` 的 `maxTokens`。2026-10-28 实测：加上之后 DSH 会出各种奇怪崩溃、切模型直接失败（`session/selectModel: active Service "sessionController" is unavailable`），只能重启；删掉即恢复。本插件不需要这个字段，它自己按配额压。
