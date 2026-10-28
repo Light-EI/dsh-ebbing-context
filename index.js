@@ -190,9 +190,9 @@ function remindIfNeeded(ctx, config, state, payload) {
   // 这张地图是此刻现算的，比模型自己调工具拿到的更新。
   let mapText = ''
   try {
+    mapText = '\n\n' + renderMap(ctx, payload.agent, config).text
     const s = ctx.sessions.get(payload.agent.id)
     if (s) issue(payload.agent.id, s)
-    mapText = '\n\n' + renderMap(ctx, payload.agent, config).text
   } catch {}
 
   const text =
@@ -373,7 +373,7 @@ function readUsage(ctx, session, config) {
     // 不扣掉这块预留，75% 这条线会正好压在真实上限上（例如 1M 窗口里预留 256K，真实输入上限只有 ~792K，
     // 而 75% × 1M = 786K 已经贴着墙了）。所以分母用"可用输入预算"。
     const reserve = reservedTokens(ctx, session, config)
-    const budget = Math.max(1, s.contextWindow - reserve)
+    const budget = Math.max(Math.floor(s.contextWindow * 0.1), s.contextWindow - reserve)
     return { ratio: used / budget, used, window: s.contextWindow, budget, reserve }
   } catch {
     return null
