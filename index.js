@@ -125,7 +125,7 @@ export function apply(ctx, rawConfig = {}) {
 function remindIfNeeded(ctx, config, state, payload) {
   const session = ctx.sessions.get(payload.agent.id)
   if (!session) return
-  const usage = readUsage(ctx, session)
+  const usage = readUsage(ctx, session, config)
   if (!usage) return
 
   const id = payload.agent.id
@@ -354,17 +354,33 @@ function requireAgent(ctx, exec) {
 // used = pressureTokens + surfaceTokens - sampledSurfaceTokens（没有采样时退回 surfaceTokens）
 // 占用读数：真实 usage 做锚、启发式只算增量，所以比例可信；
 // 但绝对 token 数是我们自己的口径，别拿它跟宿主日志里的数对账。
-function readUsage(ctx, session) {
+function readUsage(ctx, session, config) {
   try {
     const s = ctx.sessionProjections?.stateOf?.(session, 'contextPressure')
     if (!s || typeof s.contextWindow !== 'number' || s.contextWindow <= 0) return null
     if (typeof s.surfaceTokens !== 'number') return null
     const hasSample = typeof s.pressureTokens === 'number' && typeof s.sampledSurfaceTokens === 'number'
     const used = hasSample ? Math.max(0, s.pressureTokens + s.surfaceTokens - s.sampledSurfaceTokens) : s.surfaceTokens
-    return { ratio: used / s.contextWindow, used, window: s.contextWindow }
+    // 宿主的 contextWindow 是"输入 + 输出"的总窗口，而请求里还要给输出预留 maxTokens。
+    // 不扣掉这块预留，75% 这条线会正好压在真实上限上（例如 1M 窗口里预留 256K，真实输入上限只有 ~792K，
+    // 而 75% × 1M = 786K 已经贴着墙了）。所以分母用"可用输入预算"。
+    const reserve = reservedTokens(ctx, session, config)
+    const budget = Math.max(1, s.contextWindow - reserve)
+    return { ratio: used / budget, used, window: s.contextWindow, budget, reserve }
   } catch {
     return null
   }
+}
+
+// 输出预留：优先读这条路由真实用的 maxTokens；读不到就用配置里的兜底值。
+function reservedTokens(ctx, session, config) {
+  try {
+    const header = session && session.requestHeader ? session.requestHeader() : undefined
+    const mt = header && header.config && header.config.maxTokens
+    if (typeof mt === 'number' && mt > 0) return mt
+  } catch {}
+  const fallback = config && config.reservedTokens
+  return typeof fallback === 'number' && fallback > 0 ? fallback : 0
 }
 
 // 各区实际占用：用插件自己的估算器（跟地图里显示的一致）。
