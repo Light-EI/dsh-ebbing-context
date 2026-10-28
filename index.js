@@ -145,7 +145,8 @@ function remindIfNeeded(ctx, config, state, payload) {
   let zoneOver = {}
   if (st.zonesTurn !== turn) {
     st.zonesTurn = turn
-    zoneOver = readZoneOver(ctx, session, config, usage.window)
+    // 区配额与触发线必须用同一个分母（可用输入预算），否则两套账。
+  zoneOver = readZoneOver(ctx, session, config, usage.budget)
     for (const key of ['l1', 'l2', 'l3']) {
       if (zoneOver[key] && !st.zones[key]) {
         st.zones[key] = true
