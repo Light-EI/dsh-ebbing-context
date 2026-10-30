@@ -42,9 +42,16 @@
 
 ## 安装
 
-两种方式，都还没在真机上验证过：
+三种方式，都还没在真机上验证过。**npm 包尚未发布**（名字已占位为 `dsh-ebbing-context`），下面第一条等上架后才可用。
 
-**方式一（推荐）**
+**方式零（npm，上架后）**
+
+```bash
+npm i -g dsh-ebbing-context
+dsh plugin add dsh-ebbing-context
+```
+
+**方式一（推荐，源码目录）**
 
 ```bash
 dsh plugin add "C:\path\to\dsh-ebbing-context"
@@ -101,7 +108,7 @@ MIT。
 
 插件里检查点前导语（`This is an automatically generated checkpoint …`）与被压内容边界标签（`<compacted-summary>` / `</compacted-summary>`）的**文字**抄自 DSH 自带的 `@deepseek-ai/dsh-compaction-basic`（MIT）——宿主界面与日志靠这段文字识别检查点，必须逐字节一致。除此之外没有复制任何代码。
 
-当前实现的完整规范见 [`docs/SPEC.md`](docs/SPEC.md)。
+当前实现的完整规范见 [docs/SPEC.md](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md)；设计推演与取舍见 [机制与实现路径](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/机制与实现路径.md)。
 
 ---
 
@@ -118,3 +125,5 @@ npm test
 ```
 
 同一个测试集在 CI 里跑 Node 20 与 22 两档（见 `.github/workflows/test.yml`）。
+
+安全问题**不要开公开 Issue**，走 [私密报告](https://github.com/Light-EI/dsh-ebbing-context/security/advisories/new)，细节见 [SECURITY.md](https://github.com/Light-EI/dsh-ebbing-context/blob/main/SECURITY.md)。
