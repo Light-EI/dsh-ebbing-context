@@ -53,7 +53,7 @@
   "scripts": {
     "test": "node test/blocks.test.mjs && node test/compress.test.mjs && node test/callfold.test.mjs && node test/config.test.mjs && node test/map.test.mjs && node test/prestep.test.mjs && node test/usage.test.mjs",
     "check": "node --check index.js && node --check client.js && node --check lib/blocks.js && node --check lib/callfold.js && node --check lib/compress.js && node --check lib/config.js && node --check lib/license.js && node --check lib/log.js && node --check lib/map.js && node --check lib/messages.js && node --check lib/tokens.js",
-    "pack": "npm pack --pack-destination dist",
+    "pack": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true})\" && npm pack --pack-destination dist",
     "prepublishOnly": "npm run check && npm test"
   },
   "dsh": {
