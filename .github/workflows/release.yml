@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（默认取当前分支的 v* 标签；手动填如 v0.1.2）'
+        required: false
 
 permissions:
   contents: write
