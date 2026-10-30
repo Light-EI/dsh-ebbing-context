@@ -23,3 +23,9 @@
 - 会话搜索缺失时拒绝执行（`requireSessionQuery`，默认开）。
 - 空节点、缺轮次大纲、某层不足两块、最后一块、`keepTurns` 保护圈等情形都有明确拒绝文案，不静默改数据。
 - 只改 `tool/result` 的正文内容，或用一对「调用 + 返回」整段替换成一条用户消息——不做单节点删除，不留孤儿。
+
+### 发行准备（尚未上架）
+
+- 包名 `dsh-ebbing-context`，`publishConfig.access: public`；`private` 已去掉，`prepublishOnly` 会先跑语法检查与全部测试。
+- `npm run pack` 生成 `dist/dsh-ebbing-context-0.1.0.tgz`；打 `v*` 标签时 CI 自动打包并挂到 Release，配了 `NPM_TOKEN` 才顺带 `npm publish`。
+- 目前**没有发到 npm、也没有建正式 Release**：等真机验证过再上架。
