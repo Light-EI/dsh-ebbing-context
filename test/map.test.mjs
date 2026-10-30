@@ -60,6 +60,10 @@ check('地图带可压位置段', /可压位置/.test(text))
 check('地图带压缩须知段', /压缩须知/.test(text))
 check('地图给出 l0 的轮号范围写法', /可写 to=T\d+–T\d+|暂不可用/.test(text))
 check('地图给出 l1/l2 的块序号范围写法', /可写 to=1–\d+|暂不可用/.test(text))
+// 压不动时不能再出现「前 N 块」这种半截话：N 该由插件算好，不该让模型猜。
+// 有可压范围就写真实区间（压 L1 区最老的 1–3 块），没有就写「一段」。
+check('可压位置里不出现「前 N 块」这种没算好的占位说法', !/前 N 块/.test(text), text.slice(0, 600))
+check('l1/l2 可压时直接写真实区间或「一段」', /l1\s+压 L1 区最老的(\s+\d+–\d+ 块|一段)/.test(text) && /l2\s+压 L2 区最老的(\s+\d+–\d+ 块|一段)/.test(text), text.slice(0, 700))
 
 if (failed) {
   console.error(`\n${failed} 项失败`)
