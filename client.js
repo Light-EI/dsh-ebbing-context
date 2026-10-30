@@ -40,27 +40,27 @@ window.__ModuleLoader__.load({
     const FIELDS = [
       {
         group: '配额', label: 'L1 占比', path: ['budget', 'l1'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第一层把「原文」折成块，最多占可用输入的比例。0.10 表示最多占 10%。三层加起来不要超过 0.30。',
+        detail: '第一层把「原文」折成块，整层合计最多占可用输入的比例。0.10 表示最多占 10%。三层加起来不要超过 0.30。',
       },
       {
         group: '配额', label: 'L2 占比', path: ['budget', 'l2'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第二层把「L1 块」再折一次，最多占可用输入的比例。',
+        detail: '第二层把「L1 块」再折一次，整层合计最多占可用输入的比例。',
       },
       {
         group: '配额', label: 'L3 占比', path: ['budget', 'l3'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第三层只放关键词句，用来保住任务目标、约束和结论。它不会自己长大；只有 L2 并进来时才会变大。',
+        detail: '第三层只放关键词句，用来保住任务目标、约束和结论。整层合计最多占可用输入的比例。',
       },
       {
         group: '单块上限', label: 'L1 单块上限', path: ['segment', 'l1'], kind: 'number', step: 100, min: 64,
-        detail: '一个 L1 块正文最多多少 token。超过就要求模型拆成两次压缩，或写短一点。',
+        detail: '一个 L1 块正文最多多少 token（按等效 token 算：中文 1 字约 1）。超了这次调用会被整批拒绝，拒绝里给出实际值与上限；怎么调整由模型自己判断（换一段更小的范围、或分几次压），不要为了塞进上限删内容。',
       },
       {
         group: '单块上限', label: 'L2 单块上限', path: ['segment', 'l2'], kind: 'number', step: 100, min: 64,
-        detail: '一个 L2 块正文最多多少 token。',
+        detail: '一个 L2 块正文最多多少 token。超过同样整批拒绝，并给出实际值与上限。',
       },
       {
         group: '单块上限', label: 'L3 单块上限', path: ['segment', 'l3'], kind: 'number', step: 100, min: 64,
-        detail: '一个 L3 块正文最多多少 token。L3 可以有多块，压一次产出一块，旧的原地不动。',
+        detail: '一个 L3 块正文最多多少 token。压 l2 时新块追加在 L3 区末尾、旧 L3 块不动；压 l3 时整个 L3 区并成一块，旧块一起并进去——所以这一块的上限也决定了 L3 区最后一次压缩能留下多少。',
       },
       {
         group: '单块上限', label: '块标题上限', path: ['title', 'maxTokens'], kind: 'number', step: 5, min: 4,
@@ -68,11 +68,11 @@ window.__ModuleLoader__.load({
       },
       {
         group: '提醒', label: '开启提醒', path: ['notice', 'enabled'], kind: 'boolean',
-        detail: '三种提醒（到线、增长、某层超预算）的总开关：开着时插件往对话里追加提醒，让模型自己去调压缩工具，不替模型压；关掉就完全不提醒。',
+        detail: '提醒的总开关。开着时，插件在每一轮收尾（该叫醒时把模型叫醒）递一条提醒并附上当前地图，让模型自己决定压不压——它从不替模型压缩。关掉就完全不提醒，压缩本身不受影响。',
       },
       {
         group: '提醒', label: '增长提醒阈值', path: ['notice', 'growthTokens'], kind: 'number', step: 1000, min: 0,
-        detail: '另一个独立触发条件：自上次提醒后上下文又长了这么多 token 就再提醒一次，即使总量还没到线。写 0 只关掉这一条（到线与某层超预算的提醒仍会发）。',
+        detail: '到线之前的另一条路：自上次提醒后又长了这么多 token 就提醒一次，即使总量还没到线。写 0 只关掉这一条（到线与某层超出设计占比仍会提醒）。',
       },
       {
         group: '提醒', label: '提醒触发占比', path: ['triggerPct'], kind: 'number', step: 0.01, min: 0.1, max: 0.99,
@@ -92,7 +92,7 @@ window.__ModuleLoader__.load({
       },
       {
         group: '行为', label: '要求可取回原文', path: ['requireSessionQuery'], kind: 'boolean',
-        detail: '压缩是把原文换成摘要，摘要写坏就没了。DSH 的实验性「会话搜索」插件能按事件号读回原始事件。开着时，一旦发现没装它就直接拒绝压缩并报错，宁可上下文大着也不做不可逆的事；关掉则不管有没有取回工具都允许压。',
+        detail: '它不改变压缩本身：开或关，compress 都照常工作。它只决定「没有取回工具时要不要停用」——开着时，一旦发现没装「会话搜索」，两个工具就停用并说明原因，宁可上下文大着也不做取不回的事；关掉时照常压，代价是压掉的原文按事件号也找不回来了。',
       },
       {
         group: '行为', label: '输出预留兜底', path: ['reservedTokens'], kind: 'number', step: 1000, min: 0,
