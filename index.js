@@ -715,7 +715,11 @@ function fullMap(ctx, agent, config) {
   }
 }
 
-// 统一 DSL：object 根不带 additionalProperties；必填用逐属性 required:true。
+// 统一 DSL：object 根不带 additionalProperties；顶层可以不写 required。
+// 注意：**嵌套对象里的必填只能写成标准 JSON Schema 的 required 数组**，
+// 不能写成逐属性 `required: true`——宿主只把「顶层」逐属性布尔折成数组，
+// 嵌套层原样透传给 provider，OpenAI 兼容线看到 `required: true` 会整轮失败：
+// `Invalid schema for function 'compress': true is not of type "array"`。
 // 写法规范只在 l3 上写全（它排第一，模型从左往右生成时先读到），其余三个键给一行摘要，
 // 否则同一段说明会随四个键各存一份，每轮请求白付四倍。
 function blockSpec(desc, needTo, titleLimit, rich, toText) {
@@ -732,13 +736,14 @@ function blockSpec(desc, needTo, titleLimit, rich, toText) {
     '注意：更早的摘要里已经有的内容，只有在那个块这次不会被一起压掉时才能省；如果它就在你这次压掉的块里，必须写进新摘要。' +
     '只记事实和状态，不要写成一段对话：没真发出去的回复不要写成已发送，也不要列"已回答"这类清单。'
   const properties = {
-    title: { type: 'string', required: true, description: rich ? titleFull : `同 l3 的 title：一个短名词短语，上限 ${titleLimit} token。` },
-    summary: { type: 'string', required: true, description: rich ? summaryFull : '同 l3 的 summary 规则：四行——用户意图 / 模型实际执行（含失败的尝试和原因）/ 运行结论（附件写全路径或地址）/ 数据；删过程叙述，但决策依据和失败原因要留。' },
+    title: { type: 'string', description: rich ? titleFull : `同 l3 的 title：一个短名词短语，上限 ${titleLimit} token。` },
+    summary: { type: 'string', description: rich ? summaryFull : '同 l3 的 summary 规则：四行——用户意图 / 模型实际执行（含失败的尝试和原因）/ 运行结论（附件写全路径或地址）/ 数据；删过程叙述，但决策依据和失败原因要留。' },
   }
   if (needTo) {
-    properties.to = { type: 'string', required: true, description: toText }
+    properties.to = { type: 'string', description: toText }
   }
-  return { type: 'object', properties, description: desc }
+  // 嵌套层的必填用数组（见上方注释）：否则 provider 会看到 `required: true`。
+  return { type: 'object', properties, required: Object.keys(properties), description: desc }
 }
 
 function textOutput() {
