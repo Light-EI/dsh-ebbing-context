@@ -2,8 +2,8 @@
 # 注意：profile 层覆盖该行时 config 会被整份替换（不深合并），改参数要写全。
 
 - insert:
-    - id: dsh-infinity-context
-      name: dsh-infinity-context
+    - id: dsh-ebbing-context
+      name: dsh-ebbing-context
       config:
         budget:
           l1: 0.10
@@ -14,11 +14,13 @@
           l2: 2000
           l3: 5000
         triggerPct: 0.75
+        keepTurns: 2
         notice:
           enabled: true
           growthTokens: 65000
         title:
           maxTokens: 50
-          lang: zh
         requireSessionQuery: true
         pruneFirst: true
+        foldCallRecord: true
+        reservedTokens: 0
