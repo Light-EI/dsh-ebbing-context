@@ -2,6 +2,17 @@
 
 本文件只记“对外可见的变化”。规范里每一条规则为什么这么定，见 [`docs/SPEC.md`](docs/SPEC.md)。
 
+## [0.1.1] — 2026-10-30
+
+修一个会让**整轮请求**失败的参数 schema 错误——首次真机运行暴露出来的第一个问题。
+
+### 修复
+
+- `compress` 的嵌套块参数（`l0` / `l1` / `l2` / `l3`）原来在属性上写 `required: true`。宿主的工具描述转换只处理顶层属性，嵌套层原样发给 provider；OpenAI 兼容线只接受数组形式，于是整轮失败：
+  `Invalid schema for function 'compress': true is not of type "array"`。
+  现在块对象自身声明 `required: ["title","summary"]`（`l0`/`l1`/`l2` 另加 `"to"`）。
+- 新增递归断言：参数树里任何 `required` 都必须是数组（`test/prestep.test.mjs`）。以后再往嵌套层加参数，这条断言会先失败。
+
 ## [0.1.0] — 2026-10-30
 
 首个版本。**尚未在真机上安装运行过**，请按 README 的步骤自行验证。

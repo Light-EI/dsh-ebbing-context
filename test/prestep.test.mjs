@@ -92,6 +92,30 @@ await check('apply() 能挂上：两个工具 + 一条命令', async () => {
   assert.equal(typeof ctx.handlers.get('agent/pre-step'), 'function')
 })
 
+// 真机（OpenAI 兼容线）会因为嵌套对象里的 `required: true` 整轮失败：
+// `Invalid schema for function 'compress': true is not of type "array"`。
+// 这里钉住：参数树里任何 required 都必须是数组，且四个块对象各自声明必填数组。
+await check('compress 的参数树里没有布尔 required（嵌套层必须用 required 数组）', async () => {
+  const registered = []
+  const ctx = fakeCtx(null)
+  ctx.tools = { register: (tool) => (registered.push(tool), () => {}) }
+  apply(ctx, {})
+  const compress = registered.find((t) => t.name === 'compress')
+  const boolRequired = []
+  const walk = (node, path) => {
+    if (!node || typeof node !== 'object') return
+    if (node.required !== undefined && !Array.isArray(node.required)) boolRequired.push(path)
+    for (const [key, value] of Object.entries(node.properties || {})) walk(value, `${path}.properties.${key}`)
+  }
+  walk(compress.parameters, 'parameters')
+  assert.deepEqual(boolRequired, [])
+
+  const blocks = compress.parameters.properties
+  assert.deepEqual(Object.keys(blocks).sort(), ['l0', 'l1', 'l2', 'l3'])
+  assert.deepEqual([...blocks.l3.required].sort(), ['summary', 'title'])
+  assert.deepEqual([...blocks.l0.required].sort(), ['summary', 'title', 'to'])
+})
+
 await check('pre-step 空跑：不抛异常，且一定调用 next()', async () => {
   const session = fakeSession([10], [{ role: 'user', content: [{ type: 'text', text: '你好' }] }])
   const ctx = fakeCtx(session)
