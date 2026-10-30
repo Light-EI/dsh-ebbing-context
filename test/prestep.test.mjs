@@ -329,4 +329,35 @@ await check('foldPending 出错也不抛：记一条失败日志、留住这一�
   assert.equal(queue.failures, 2)
 })
 
+// 设计裁定（用户 m13359 选 A）：剪枝只在 compress 里做，与宿主同构——
+// 宿主把 toolResultPruner 当「压缩的前置步骤」（pressure 越线 / context-overflow 才叫），
+// 不压缩就不该动表层。常开会在任意步削掉模型正要引用的内容，而剪掉的内容不一定取得回
+// （没装会话搜索时工具是停用的，剪枝却不受那道闸门约束）。这条钉住"又有人把它挂回每步"。
+function hugeToolResultSession(text) {
+  const event = { type: 'tool/result', data: { message: { content: [{ type: 'text', text }] } } }
+  // 真会话的 log 是稀疏数组（下标就是事件号），测试照这个形状来。
+  const log = []
+  log[1] = { type: 'user/message', data: {} }
+  log[2] = event
+  return { surface: { nodes: [1, 2] }, log }
+}
+
+await check('pre-step 不剪枝：超大工具返回原样留着，只有 compress 才剪', async () => {
+  const session = hugeToolResultSession('x'.repeat(5000))
+  const ctx = fakeCtx(session)
+  ctx.tools = { register: () => () => {} }
+  const pruneCalls = []
+  const realGet = ctx.get
+  ctx.get = (name) => {
+    if (name === 'toolResultPruner') {
+      return { config: { thresholdChars: 100 }, pruneSession: (s) => { pruneCalls.push(s); return { pruned: [], charsRemoved: 0 } } }
+    }
+    return realGet(name)
+  }
+  apply(ctx, {})
+  const handler = ctx.handlers.get('agent/pre-step')
+  await handler({ agent: { id: 'a1' }, turn: 3, step: 1 }, () => {})
+  assert.equal(pruneCalls.length, 0, 'pre-step 一次都不该叫 pruner')
+})
+
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

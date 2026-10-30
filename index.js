@@ -84,8 +84,6 @@ const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 // 我们自己的提醒用这个来源标记：既让宿主把我当成普通用户消息写进表层，
 // 也让 noteUserSpoke() 能分辨"这一轮是用户开口的"还是"这一轮是我把自己叫醒的"。
 const NOTICE_KIND = 'ebbing-context-notice'
-// 剪枝前只看尾部这么多个节点：新出现的超大工具返回一定在这里面。
-const PRUNE_SCAN_NODES = 12
 
 export function apply(ctx, rawConfig = {}) {
   // 自己先验一遍：不依赖宿主 schema，加载不到 schemastery 也不会静默放过写错的配置。
@@ -171,9 +169,10 @@ export function apply(ctx, rawConfig = {}) {
       // 先收上一次 compress 的调用记录：这一步仍在同一个 turn 内，且在下一次请求之前，
       // 所以那份参数副本不会再被发出去一次。
       foldPending(ctx, config, foldQueues, payload, log)
-      // 再把新出现的大工具返回剪一遍：宿主只在它自己的自动压缩里叫 pruner，
-      // 关掉自动压缩之后就没人叫它了。
-      maybePrune(ctx, config, payload, log)
+      // 这里不再顺手剪工具返回。宿主的剪枝是「压缩的前置步骤」（pressure 越过阈值
+      // 或 context-overflow 时才叫），我们与它同构：只在 compress 里剪一次。
+      // 想每步都剪的话会越权改写模型正在用的内容，而且剪掉的内容不一定取得回来
+      // （没装会话搜索时工具是停用的，剪枝却不受那道闸门约束）。
       // 上一轮以异常/取消收场时 turn-stopping 不会来，那条提醒的信号已经作废。
       // 它记录的是「那一刻」的读数，发出去就是过期信息——直接丢掉，让这一步重新判一次。
       dropStaleNotice(pendingByAgent, payload, log)
@@ -249,49 +248,9 @@ function foldQueueFor(queues, agentId) {
   return queue
 }
 
-// 宿主的大工具返回清理只在它自己的自动压缩里被调用（context-overflow 与 pressure 两处），
-// 一旦宿主自动压缩被关掉，就没有任何人再叫 pruner：每个大返回都原样留在上下文里，
-// 直到我们自己压它——而中间那几千字往往一次都不会被再读到。
-// 所以这里在每步请求前看一眼最近的节点：有超过阈值的工具返回就剪一遍。
+// 剪枝只在 compress 里做（见 lib/compress.js 的 prepare 段）：宿主把 toolResultPruner
+// 当作压缩的前置步骤，我们也只在"要压了"的那一刻动表层，不越权改写模型正在用的内容。
 // 宿主保证幂等：剪过的内容一定低于阈值，再剪一次返回空表。
-// 剪枝是原位替换，节点数与块位置都不变，所以已发出的地图仍然准确；
-// 但它会让 replaceGeneration 上涨，续一次证免得下一次压缩被误判"地图过期"。
-export function maybePrune(ctx, config, payload, log) {
-  if (!config.pruneFirst) return
-  const id = payload.agent.id
-  const pruner = ctx.get('toolResultPruner')
-  if (!pruner || typeof pruner.pruneSession !== 'function') return
-  const session = ctx.sessions.get(id)
-  if (!session) return
-  const nodes = session.surface && session.surface.nodes
-  if (!Array.isArray(nodes) || nodes.length === 0) return
-  const threshold = pruner.config && typeof pruner.config.thresholdChars === 'number'
-    ? pruner.config.thresholdChars
-    : 8192
-  // 新出现的超大返回一定在尾部（工具结果落盘后，下一次 pre-step 就能看到它），
-  // 只扫尾部一段，免得每步都遍历整张表层。这里按 UTF-16 长度粗判即可——
-  // 真正剪不剪由宿主按 code point 精确决定。
-  let oversized = false
-  for (let i = Math.max(0, nodes.length - PRUNE_SCAN_NODES); i < nodes.length; i += 1) {
-    const event = Array.isArray(session.log) ? session.log[nodes[i]] : null
-    if (!event || event.type !== 'tool/result') continue
-    const content = event.data && event.data.message && event.data.message.content
-    if (!Array.isArray(content)) continue
-    let chars = 0
-    for (const block of content) {
-      if (block && block.type === 'text' && typeof block.text === 'string') chars += block.text.length
-    }
-    if (chars > threshold) {
-      oversized = true
-      break
-    }
-  }
-  if (!oversized) return
-  const result = pruner.pruneSession(session)
-  if (!result || !Array.isArray(result.pruned) || result.pruned.length === 0) return
-  log('prune', { agent: id, count: result.pruned.length, charsRemoved: result.charsRemoved })
-  try { restate(id, session) } catch {}
-}
 
 // 导出仅供测试：这一层是胶水层，纯函数测不到它，而"用了外层作用域的变量却没接收成参数"
 // 这类错误只有真跑一次才会暴露（见 ee1fb7e）。plugin/test/prestep.test.mjs 直接调它。
