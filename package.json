@@ -1,32 +1,59 @@
 {
-  "name": "dsh-infinity-context",
+  "name": "dsh-ebbing-context",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，只写宿主本来就认识的会话事件。",
+  "description": "DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，只写宿主本来就认识的会话事件。名字取自「渐渐消退」——模拟记忆的自然衰退，越旧的内容分辨率越低，但不是删掉。",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./client": "./client.js"
   },
   "files": [
     "index.js",
+    "client.js",
     "lib/",
     "dsh.bundle.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "keywords": [
-    "cordis",
+    "dsh",
+    "dsh-plugin",
     "dsh-bundle",
+    "cordis",
     "cordis-plugin",
-    "dsh-plugin"
+    "context",
+    "context-compression",
+    "compaction",
+    "memory",
+    "layered",
+    "ebbing",
+    "ebbing-context",
+    "ebing-context"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Light-EI/dsh-ebbing-context.git"
+  },
+  "homepage": "https://github.com/Light-EI/dsh-ebbing-context#readme",
+  "bugs": {
+    "url": "https://github.com/Light-EI/dsh-ebbing-context/issues"
+  },
+  "author": "Light-EI",
+  "engines": {
+    "node": ">=20"
+  },
   "dsh": {
     "bundle": {
       "patch": "./dsh.bundle.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "peerDependencies": {

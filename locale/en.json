@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Infinity Context",
+    "title": "Ebbing Context",
     "description": "Gives the model a layered way to fold old conversation into summaries it writes itself, using only standard session events."
   }
 }
