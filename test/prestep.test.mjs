@@ -165,8 +165,22 @@ function wakeAgent() {
   const agent = {
     id: 'a1',
     followups: [],
+    replaced: [],
+    inbox: {
+      // 宿主每轮只认领一条 next-turn（agent-loop 的 claim 是 mutate(..., 0, 1, ...)），
+      // 所以这里模拟真实的 pending 列表：默认空。
+      nextTurn: [],
+      replace(messageId, message) {
+        const at = agent.inbox.nextTurn.findIndex((m) => m.id === messageId)
+        if (at < 0) return false
+        agent.inbox.nextTurn[at] = message
+        agent.replaced.push({ messageId, message })
+        return true
+      },
+    },
     followup(message) {
       agent.followups.push(message)
+      agent.inbox.nextTurn.push(message)
     },
   }
   return agent
@@ -244,12 +258,31 @@ await check('用户真的开口了：闸门复位，下一轮收尾又能叫醒'
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
   const s4 = STEP(4, 1, { agent: s3.agent, messages: s3.agent.followups.slice() })
   await ctx.handlers.get('agent/pre-step')(s4, () => {})
+  // 宿主认领时会从 inbox 里把它摘走（claim 里是 splice remove），这里同步模拟
+  s3.agent.inbox.nextTurn = []
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: s4.signal }, () => {})
   // 用户发了一句话，这一轮的新信号里认领到的是用户那条
   const s5 = STEP(5, 1, { agent: s3.agent, messages: [{ role: 'user', content: [], source: { kind: 'user' } }] })
   await ctx.handlers.get('agent/pre-step')(s5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: s5.signal }, () => {})
   assert.equal(s3.agent.followups.length, 2, '用户开口之后可以再叫醒一次')
+})
+
+await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞第二条', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const agent = wakeAgent()
+  // 模拟"上一轮以异常收场、提醒没人认领"：inbox 里留着一条我们的提醒
+  const stale = { id: 'stale-1', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: '旧提醒' }], source: { kind: 'cordis-host-runner' } }
+  agent.inbox.nextTurn.push(stale)
+  const s3 = STEP(3, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(s3, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
+  assert.equal(agent.followups.length, 0, '有旧提醒时不该再 followup 一条新的')
+  assert.equal(agent.replaced.length, 1, '应该就地替换旧提醒')
+  assert.equal(agent.inbox.nextTurn.length, 1, '队列里始终只有一条我们的提醒')
+  assert.match(String(agent.inbox.nextTurn[0].content[0].text), /自动提醒/, '替换进去的是这次的新读数')
 })
 
 await check('同一条提醒只发一次：第二次 turn-stopping 不再发', async () => {
