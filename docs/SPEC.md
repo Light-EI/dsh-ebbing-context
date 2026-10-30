@@ -377,7 +377,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 
 ## 13. `compress` 的处理顺序
 
-1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`）→ 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
+1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`；宿主的剪枝是**全局面板**：任何工具返回超过 `thresholdChars` 8192 字符就挖掉中间、留头 4096 + 尾 1024，只改 `tool/result`，碰不到 `assistant/message` 与 `user/message` ⇒ 压缩块与摘要剪不到）→ 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
 
 **多键批失败时要说清落在哪一步**：预演阶段失败则"一条都没写"；落盘阶段失败则把 `result.partial` 里已经写进去的层名列出来（`plugin/index.js` 读 `partial`，不是 `results`）——否则模型会整批重发，把已写的层再压一遍。
 
@@ -700,6 +700,7 @@ interface ConfigPageForm {
 - **`form` 为 `undefined` 时不能只说"正在读取"**：宿主侧插件根本没启动（loader 的 import 失败被吞成一行日志，`ref\upstream\installed\cordis-plugin-loader.index.js:452-456` 的 `this.ctx.logger.error(error); return;`），插件行会停在「未运行」而不是「运行中」。所以这个页面等 4 秒仍拿不到 `form`，就改说"宿主侧没有启动起来、去看日志里的 import 错误"——否则用户对着一片空白无从下手。
 - 页面不读文件、不调模型。显示值 = **宿主值打底、未保存草稿覆盖**：没有草稿时读 `form.state.value`，有草稿时读草稿；点「放弃修改」清掉草稿即回到宿主值。
 - **页面最上方有一条常驻的「使用注意」**（`plugin/client.js` 的 `TEXT.note` + `noteStyle`，不折叠、不随草稿变化）：提醒关掉宿主自带的自动压缩（`compaction-basic` 的 `auto`，默认 80% 触发）。理由写在上面那段文案里：它一触发会把多层摘要重新拍平成一段高层摘要、原有细节永久丢失；插件本身不受影响，但效果打折。这条是纯提示，不改任何配置——我们不能替用户改宿主那行（它在 `group` 里，跨组按 `id` 覆盖会连带改 `isolate`）。
+- **面板文案不许写本机细节，也不许写死配置入口**（2026-10-30 用户当场指出，`m13060`）：文案里曾出现"（本机 desktop profile 已经是 false）"和"关法：在 profile 的 `cordis.patch.yml` 里给 compaction-basic 那行写 `config: { auto: false }`"——前者把我们这台机器的配置当成通用事实，后者假定所有人都用同一套 profile/预设（`cordis` 那套只是其中一种）。现在只说"会发生什么"与"确认内置压缩不再自动触发即可"，位置交给用户按自己的安装去关。同理适用于所有 `detail`：只描述插件自己的行为与代价，不描述本机环境。
 
 ### 21.4 与 YAML 的关系
 
