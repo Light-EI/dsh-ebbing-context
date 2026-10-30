@@ -831,8 +831,11 @@ blocks 41 项（新增 5 项：带 `+` 的块头解析、`+` 未封口标记、�
 | 空节点 / 精确映射（`deriveExactly`） | §4.2、§4.3 的排查表 |
 | 占用与分母口径（`tokenMeter` / 投影） | §20.3、§12 的 `reservedTokens`、§19 的兼容分支 |
 | 任何"取消某条拒绝"或"放宽某条校验" | §19 的缺口表 + §24 的判据复核 |
+| 新增对宿主服务的调用、改变触发时机（如剪枝、折叠、叫醒） | 对应节 + `notes/维护手册.md` 第 1 节的"行为变更"表（写清以前怎样、现在怎样、代价、怎么回滚） |
 
-改完必跑：`node plugin/test/{blocks,compress,callfold,config,prestep,usage,map}.test.mjs`（当前 45/11/14/11/12/8/8），并对全部 `plugin/**/*.js` 跑一次 `node --check`。
+改完必跑：`node plugin/test/{blocks,compress,callfold,config,prestep,usage,map}.test.mjs`（当前 47/11/18/11/16/8/8），并对全部 `plugin/**/*.js` 跑一次 `node --check`。
+
+**坑与排查顺序不在本规范里**：那些写在 `notes/维护手册.md`（允许随时删改，不是规范）。
 
 ---
 
