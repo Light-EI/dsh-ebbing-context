@@ -372,6 +372,9 @@ await check('turn-stopping 按 serial 派发只传一个参数：不抛异常，
   apply(ctx, {})
   const handler = ctx.handlers.get('agent/turn-stopping')
   assert.equal(typeof handler, 'function', 'turn-stopping 必须挂上')
+  // 参数个数也要对：serial 监听器只收 payload。写成 (payload, next) 时 length 是 2，
+  // 这里直接拦下——比等到真机收尾崩一次便宜得多。
+  assert.equal(handler.length, 1, 'serial 监听器只能收 payload（写成 (payload, next) 会崩）')
   // 只传 payload —— 与宿主 dispatch.serial 的调用形状一致
   await handler({ agent: { id: 'a1' }, turn: 3, signal: { aborted: false } })
 })
