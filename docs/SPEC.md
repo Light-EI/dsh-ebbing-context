@@ -38,7 +38,7 @@
 - 硬依赖（缺了就不启动，且要给可读错误）：`tools`、`sessions`、`tokenMeter`、`agents`。
 - 软依赖（`ctx.get()` 取，缺了降级）：`sessionProjections`（缺 `turnOutline` 投影时改扫日志里的 `turn/start`，见 `plugin/lib/blocks.js` 的 `turnsFromLog`；2026-10-30 P0-4 之前它是硬依赖，结果缺投影的装配里插件完全不能用）、`systemPrompt`（缺则不注入提示段）、`toolResultPruner`（缺则跳过剪枝）、`commands`（缺则不注册命令）、`goals`（缺则不执行 `disarm`，超限通知照发）。
 - **不**注册 message projection（卸载会让旧会话拒绝派生）。台账将来用 state projection 做。
-- 推荐同时把宿主的 `compaction-basic` 设成 `auto: false`：它的自动压缩会写八段式摘要把金字塔拍平。**2026-10-30 已核实本机 desktop profile 就是 `auto: false`**（`<profile 目录>\cordis.patch.yml` 的 `- id: compaction-basic` → `config.auto: false`）；别的机器要自己确认，默认值是 `true`。
+- 推荐同时把宿主的 `compaction-basic` 设成 `auto: false`：它的自动压缩会写八段式摘要把金字塔拍平。**2026-10-30 已核实本机 desktop profile 就是 `auto: false`**（`E:\AgentSupport\DeepSeek\profiles\desktop\cordis.patch.yml` 的 `- id: compaction-basic` → `config.auto: false`）；别的机器要自己确认，默认值是 `true`。
 - 我们的 bundle patch **不去覆盖宿主的 `compaction-basic`**：那行在 `compaction` 这个 `group` 里，跨组按 id 覆盖会连带改宿主的隔离配置，风险大于收益；装机文档里改成"装机后确认这一项是 false"。
 
 **装机只有两种能真跑起来的方式**（2026-10-29 只读审核，宿主源码）：
@@ -576,6 +576,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 | `3049c19` | 终检后的 P0/P1/P2 一批：①压缩成功重置增长基线（否则 `growthTokens` 永不触发）；②并行调用折叠降级为只收紧返回正文（当晚按用户裁定改成"折地图、留每个键结果"）；③失败回执只折地图、原因逐字留；④无 `turnOutline` 投影或缺轮乱序时改读日志 `turn/start`（`turnsFromLog`）；⑤提示词去重（每请求约 −123 token）；⑥地图须知补级联一行；⑦区表加"占可用输入"百分比、图片台账移到块正文末行；⑧`dsh.bundle.patch.yml` 补齐 `keepTurns`/`foldCallRecord`/`reservedTokens`；⑨规范滞后 11 处 |
 | `7a01a4f` | 复核表跟上提醒文案（说明式）与 `commitOne` 现状 |
 | `3e2a28e` | **改名**：`dsh-infinity-context` → `dsh-ebbing-context`（Ebbing Context）。只动名字（包名、模块 id、槽位 key、bundle 行、日志名、提示词函数与段落名、locale 标题、文档），不动任何行为；工具名与命令不变 |
+| `v0.1.0`（发布） | 2026-10-30 推送 GitHub：仓库 `Light-EI/dsh-ebbing-context`（由 `dsh-infinity-context` 改名而来），默认分支 `main`，标签 `v0.1.0`，Release 标题注明"未在真机验证"。发布副本在 `ref\_pub\dsh-ebbing-context`，内容 = `plugin/` 全量 + `docs/SPEC.md` + `docs/机制与实现路径.md` + `CHANGELOG.md` + `LICENSE`。仓库当前是 **private**，`package.json` 仍是 `"private": true`（防止误发 npm）；要公开或发 npm 需单独改 |
 
 ### 20.2 三条被澄清的设计前提（写代码前先对照）
 
@@ -850,4 +851,24 @@ blocks 41 项（新增 5 项：带 `+` 的块头解析、`+` 未封口标记、�
 | 10 | **取回闸门在调用时判，不改启动即报错**：没有「会话搜索」时插件照常加载，`compress`/`context_map` 被调用时直接停用并用中文说明 | 用户 2026-10-30 裁定「保持现状」。启动即报错在宿主里是静默的（import 失败只写日志、卡片显示未运行），反而更难看懂 | `plugin/index.js` 的 `missingSessionQuery`；§19 |
 
 **设计稿的地位**：`notes/2026-10-27-DSH原生分层压缩-设计方案.md` 是**历史推演**，已在 §0.5 顶部声明不再更新、不再具规范效力。它的价值只剩两样：当初为什么这么选的推演过程，以及几张样张。任何新决定只写进本文件，**不要两边都写**——历史上两边都写的结果是设计稿的表烂了两个月没人发现。
+
+## 27. 真机首轮：`compress` 的参数 schema（0.1.1，2026-10-30）
+
+首次真机运行报：
+
+```
+Invalid schema for function 'compress': true is not of type "array"
+```
+
+整轮请求被拒——插件装上了、工具也注册了，但模型一句话都发不出去。
+
+**成因**：`compress` 的四个键（`l0`/`l1`/`l2`/`l3`）是嵌套对象，0.1.0 在它们的属性上写了 `required: true`。宿主只把**顶层** properties 的布尔 `required` 折成父级数组（`dsh-tools` 的 `parameterSchemaSpecToJsonSchema()`），嵌套层原样透传给 provider；OpenAI 兼容线要求 `required` 是字符串数组，看到 `true` 就整轮失败。
+
+**规则（写代码时照这条）**：
+1. 嵌套对象自身写 `required: ["title","summary"]`（`l0`/`l1`/`l2` 另加 `"to"`），**不要**在嵌套属性上写 `required: true`。
+2. 宿主 raw-schema 边界（`dsh-tools` 的 `assertSupportedJsonSchema()`）：`required` 必须是字符串数组、数组里的名字必须在 `properties` 里声明过、`additionalProperties` 出现时必须是布尔、只许出现 `type`/`oneOf`/`properties`/`required`/`additionalProperties`/`items`/`enum`/`const` + `description`/`title`/`default`/`examples`。
+3. 顶层 `properties` 可以不写 `required`（四个键都可选，模型按需给哪个层）。
+
+**落地**：`plugin/index.js` 的 `blockSpec()`；回归断言在 `plugin/test/prestep.test.mjs` 第 2 项（按上面三条逐节点校验整棵参数树）。**代价提醒**：这类错误的单测全绿也发现不了——只有 provider 会拒；所以任何工具参数结构的改动都要过这条断言。
+
 
