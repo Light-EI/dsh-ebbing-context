@@ -169,6 +169,10 @@ export function apply(ctx, rawConfig = {}) {
       // 先收上一次 compress 的调用记录：这一步仍在同一个 turn 内，且在下一次请求之前，
       // 所以那份参数副本不会再被发出去一次。
       foldPending(ctx, config, foldQueues, payload, log)
+      // 这里不再顺手剪工具返回。宿主的剪枝是「压缩的前置步骤」（pressure 越过阈值
+      // 或 context-overflow 时才叫），我们与它同构：只在 compress 里剪一次。
+      // 想每步都剪的话会越权改写模型正在用的内容，而且剪掉的内容不一定取得回来
+      // （没装会话搜索时工具是停用的，剪枝却不受那道闸门约束）。
       // 上一轮以异常/取消收场时 turn-stopping 不会来，那条提醒的信号已经作废。
       // 它记录的是「那一刻」的读数，发出去就是过期信息——直接丢掉，让这一步重新判一次。
       dropStaleNotice(pendingByAgent, payload, log)
@@ -244,10 +248,13 @@ function foldQueueFor(queues, agentId) {
   return queue
 }
 
+// 剪枝只在 compress 里做（见 lib/compress.js 的 prepare 段）：宿主把 toolResultPruner
+// 当作压缩的前置步骤，我们也只在"要压了"的那一刻动表层，不越权改写模型正在用的内容。
+// 宿主保证幂等：剪过的内容一定低于阈值，再剪一次返回空表。
+
 // 导出仅供测试：这一层是胶水层，纯函数测不到它，而"用了外层作用域的变量却没接收成参数"
 // 这类错误只有真跑一次才会暴露（见 ee1fb7e）。plugin/test/prestep.test.mjs 直接调它。
-export function foldPending(ctx, config, queues, payload, log) {
-  if (!config.foldCallRecord) return
+export function foldPending(ctx, config, queues, payload, log) {  if (!config.foldCallRecord) return
   const id = payload.agent.id
   const queue = queues.get(id)
   try {
