@@ -1,5 +1,7 @@
 # Ebbing Context
 
+[![test](https://github.com/Light-EI/dsh-ebbing-context/actions/workflows/test.yml/badge.svg)](https://github.com/Light-EI/dsh-ebbing-context/actions/workflows/test.yml)
+
 **模拟记忆衰退的 DSH 分层上下文压缩插件。**
 
 模型自己决定压哪里、自己写摘要；插件只把四条宿主本来就认识的会话事件写进日志，把旧内容一层层降成更粗的表示：
@@ -100,3 +102,19 @@ MIT。
 插件里检查点前导语（`This is an automatically generated checkpoint …`）与被压内容边界标签（`<compacted-summary>` / `</compacted-summary>`）的**文字**抄自 DSH 自带的 `@deepseek-ai/dsh-compaction-basic`（MIT）——宿主界面与日志靠这段文字识别检查点，必须逐字节一致。除此之外没有复制任何代码。
 
 当前实现的完整规范见 [`docs/SPEC.md`](docs/SPEC.md)。
+
+---
+
+## 参与
+
+欢迎开 Issue 与 Discussion：使用中遇到的问题、对分层策略的想法、真机验证结果都很有用。
+
+Pull Request 同样欢迎，但请先开 Issue 说明要改什么——这个插件的多数行为（提示词措辞、拒绝条件、折叠时机）都是针对宿主具体行为定的，改错一处可能让整个会话压不动，所以大改动需要先对齐设计。
+
+本地跑测试（无依赖，Node ≥ 20）：
+
+```bash
+npm test
+```
+
+同一个测试集在 CI 里跑 Node 20 与 22 两档（见 `.github/workflows/test.yml`）。

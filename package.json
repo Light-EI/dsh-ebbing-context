@@ -48,6 +48,9 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "test": "node test/blocks.test.mjs && node test/compress.test.mjs && node test/callfold.test.mjs && node test/config.test.mjs && node test/map.test.mjs && node test/prestep.test.mjs && node test/usage.test.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./dsh.bundle.patch.yml"
