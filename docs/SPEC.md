@@ -38,7 +38,7 @@
 - 硬依赖（缺了就不启动，且要给可读错误）：`tools`、`sessions`、`tokenMeter`、`agents`。
 - 软依赖（`ctx.get()` 取，缺了降级）：`sessionProjections`（缺 `turnOutline` 投影时改扫日志里的 `turn/start`，见 `plugin/lib/blocks.js` 的 `turnsFromLog`；2026-10-30 P0-4 之前它是硬依赖，结果缺投影的装配里插件完全不能用）、`systemPrompt`（缺则不注入提示段）、`toolResultPruner`（缺则跳过剪枝）、`commands`（缺则不注册命令）、`goals`（缺则不执行 `disarm`，超限通知照发）。
 - **不**注册 message projection（卸载会让旧会话拒绝派生）。台账将来用 state projection 做。
-- 推荐同时把宿主的 `compaction-basic` 设成 `auto: false`：它的自动压缩会写八段式摘要把金字塔拍平。**2026-10-30 已核实本机 desktop profile 就是 `auto: false`**（`<profile 目录>\cordis.patch.yml` 的 `- id: compaction-basic` → `config.auto: false`）；别的机器要自己确认，默认值是 `true`。
+- 推荐同时把宿主的 `compaction-basic` 设成 `auto: false`：它的自动压缩会写八段式摘要把金字塔拍平。**2026-10-30 已核实本机 desktop profile 就是 `auto: false`**（`E:\AgentSupport\DeepSeek\profiles\desktop\cordis.patch.yml` 的 `- id: compaction-basic` → `config.auto: false`）；别的机器要自己确认，默认值是 `true`。
 - 我们的 bundle patch **不去覆盖宿主的 `compaction-basic`**：那行在 `compaction` 这个 `group` 里，跨组按 id 覆盖会连带改宿主的隔离配置，风险大于收益；装机文档里改成"装机后确认这一项是 false"。
 
 **装机只有两种能真跑起来的方式**（2026-10-29 只读审核，宿主源码）：
@@ -364,7 +364,7 @@ triggerPct: 0.75
 keepTurns: 2                                       // 原文区必须留住的最后 N 轮；to 最多写到「当前轮 − N」
 notice:   { enabled: true, growthTokens: 65000 }
 requireSessionQuery: true
-pruneFirst: true                                   // 压缩前先剪巨型工具结果
+pruneFirst: true                                   // 剪大工具返回：只在每次压缩前剪一次
 foldCallRecord: true                               // 压缩成功后把「调用 + 返回」折成一句短注
 reservedTokens: 0                                  // 读不到这条路由的 maxTokens 时的输出预留兜底
 ```
@@ -377,7 +377,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 
 ## 13. `compress` 的处理顺序
 
-1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`）→ 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
+1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`；宿主的剪枝是**全局服务**：任何工具返回超过 `thresholdChars` 8192 字符就挖掉中间、留头 4096 + 尾 1024，只改 `tool/result`，碰不到 `assistant/message` 与 `user/message` ⇒ 压缩块与摘要剪不到）。同一个 pruner 只有这一个调用点：宿主自己只在它的自动压缩（context-overflow / pressure）里叫它，我们的 `auto` 关着，所以整个世界只有"我们要压缩了"这一刻会剪——**这与宿主的语义同构**：宿主也把剪枝当作压缩的前置步骤（pressure 越过阈值才调，剪完若已低于阈值连压缩都不做）。不在每步请求前剪（设计裁定，用户 m13359）：那样会在任意步削掉模型正要引用的内容，而剪掉的中间段不一定取得回（没装会话搜索时两个工具是停用的，剪枝却不受那道闸门约束）。→ 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
 
 **多键批失败时要说清落在哪一步**：预演阶段失败则"一条都没写"；落盘阶段失败则把 `result.partial` 里已经写进去的层名列出来（`plugin/index.js` 读 `partial`，不是 `results`）——否则模型会整批重发，把已写的层再压一遍。
 
@@ -576,6 +576,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 | `3049c19` | 终检后的 P0/P1/P2 一批：①压缩成功重置增长基线（否则 `growthTokens` 永不触发）；②并行调用折叠降级为只收紧返回正文（当晚按用户裁定改成"折地图、留每个键结果"）；③失败回执只折地图、原因逐字留；④无 `turnOutline` 投影或缺轮乱序时改读日志 `turn/start`（`turnsFromLog`）；⑤提示词去重（每请求约 −123 token）；⑥地图须知补级联一行；⑦区表加"占可用输入"百分比、图片台账移到块正文末行；⑧`dsh.bundle.patch.yml` 补齐 `keepTurns`/`foldCallRecord`/`reservedTokens`；⑨规范滞后 11 处 |
 | `7a01a4f` | 复核表跟上提醒文案（说明式）与 `commitOne` 现状 |
 | `3e2a28e` | **改名**：`dsh-infinity-context` → `dsh-ebbing-context`（Ebbing Context）。只动名字（包名、模块 id、槽位 key、bundle 行、日志名、提示词函数与段落名、locale 标题、文档），不动任何行为；工具名与命令不变 |
+| `v0.1.0`（发布） | 2026-10-30 推送 GitHub：仓库 `Light-EI/dsh-ebbing-context`（由 `dsh-infinity-context` 改名而来），默认分支 `main`，标签 `v0.1.0`，Release 标题注明"未在真机验证"。发布副本在 `ref\_pub\dsh-ebbing-context`，内容 = `plugin/` 全量 + `docs/SPEC.md` + `docs/机制与实现路径.md` + `CHANGELOG.md` + `LICENSE`。仓库当前是 **private**，`package.json` 仍是 `"private": true`（防止误发 npm）；要公开或发 npm 需单独改 |
 
 ### 20.2 三条被澄清的设计前提（写代码前先对照）
 
@@ -699,6 +700,11 @@ interface ConfigPageForm {
 - **`form` 为 `undefined` 时不能只说"正在读取"**：宿主侧插件根本没启动（loader 的 import 失败被吞成一行日志，`ref\upstream\installed\cordis-plugin-loader.index.js:452-456` 的 `this.ctx.logger.error(error); return;`），插件行会停在「未运行」而不是「运行中」。所以这个页面等 4 秒仍拿不到 `form`，就改说"宿主侧没有启动起来、去看日志里的 import 错误"——否则用户对着一片空白无从下手。
 - 页面不读文件、不调模型。显示值 = **宿主值打底、未保存草稿覆盖**：没有草稿时读 `form.state.value`，有草稿时读草稿；点「放弃修改」清掉草稿即回到宿主值。
 - **页面最上方有一条常驻的「使用注意」**（`plugin/client.js` 的 `TEXT.note` + `noteStyle`，不折叠、不随草稿变化）：提醒关掉宿主自带的自动压缩（`compaction-basic` 的 `auto`，默认 80% 触发）。理由写在上面那段文案里：它一触发会把多层摘要重新拍平成一段高层摘要、原有细节永久丢失；插件本身不受影响，但效果打折。这条是纯提示，不改任何配置——我们不能替用户改宿主那行（它在 `group` 里，跨组按 `id` 覆盖会连带改 `isolate`）。
+- **面板文案不许写本机细节，也不许写死配置入口**（2026-10-30 用户当场指出，`m13060`）：文案里曾出现"（本机 desktop profile 已经是 false）"和"关法：在 profile 的 `cordis.patch.yml` 里给 compaction-basic 那行写 `config: { auto: false }`"——前者把我们这台机器的配置当成通用事实，后者假定所有人都用同一套 profile/预设（`cordis` 那套只是其中一种）。现在只说"会发生什么"与"确认内置压缩不再自动触发即可"，位置交给用户按自己的安装去关。同理适用于所有 `detail`：只描述插件自己的行为与代价，不描述本机环境。
+- **`detail` 不替模型下命令，也不许暗示"缩短"**（同日 `m13136` 指出）：曾写成"超过就要求模型拆成两次压缩，或写短一点"——"两次"是我们猜的数（实际可能要三次），"写短"会诱导它删内容换合格、直接拉低摘要质量。现在只说事实：超了整批拒绝、拒绝里给出实际值与上限，怎么调整由模型自己判断，并明说不要为了塞进上限删内容。
+- **建议关掉宿主功能时，要写清"关的是什么"并给一句可复制的话**（同日 `m13173` 指出）：先前把"（本机已经是 false）"和写死的 `cordis.patch.yml` 一并删掉之后，文案退化成只说"关掉它"，用户不知道关哪里。现在三件事都写：关的是哪个行为（`compaction-basic` 的自动压缩 / 那个 `auto` 开关）、不关的后果只是效果打折、以及一句可以直接发给助手或模型的话（"帮我关掉……改完告诉我你动了哪个文件、怎么改回去"）——入口随安装方式而变，就让本来就有本机权限的模型去找。
+- **配额类文案必须写"整层合计"**（同日 `m13136`）：`budget.*` 比的是整层 token 之和，不是单块；L3 还曾多写一句"它不会自己长大"——三层都不会自己长大，单拿 L3 说事只会让人以为 L1/L2 会。L3 的特别之处只有一个，且必须说准：压 `l2` 时新块追加在末尾、旧 L3 块不动，但**压 `l3` 时整个 L3 区并成一块、旧块一起并进去**（旧 L3 不会一直在）。
+- **布尔开关的文案要写清"它改什么、不改什么"**（同日 `m13136`）：`requireSessionQuery` 曾写成"关掉则不管有没有取回工具都允许压"，读起来像开关改变了压缩行为——它其实只在"没有取回工具时要不要停用两个工具"上起作用，开与关 `compress` 都照常工作。同理 `notice.enabled` 不要在总开关里重述三条触发条件（`growthTokens` 那条已经单列，重复读起来像两个独立系统）。
 
 ### 21.4 与 YAML 的关系
 
@@ -825,8 +831,11 @@ blocks 41 项（新增 5 项：带 `+` 的块头解析、`+` 未封口标记、�
 | 空节点 / 精确映射（`deriveExactly`） | §4.2、§4.3 的排查表 |
 | 占用与分母口径（`tokenMeter` / 投影） | §20.3、§12 的 `reservedTokens`、§19 的兼容分支 |
 | 任何"取消某条拒绝"或"放宽某条校验" | §19 的缺口表 + §24 的判据复核 |
+| 新增对宿主服务的调用、改变触发时机（如剪枝、折叠、叫醒） | 对应节 + `notes/维护手册.md` 第 1 节的"行为变更"表（写清以前怎样、现在怎样、代价、怎么回滚） |
 
-改完必跑：`node plugin/test/{blocks,compress,callfold,config,prestep,usage,map}.test.mjs`（当前 45/11/14/11/12/8/8），并对全部 `plugin/**/*.js` 跑一次 `node --check`。
+改完必跑：`node plugin/test/{blocks,compress,callfold,config,prestep,usage,map}.test.mjs`（当前 47/11/18/11/16/8/8），并对全部 `plugin/**/*.js` 跑一次 `node --check`。
+
+**坑与排查顺序不在本规范里**：那些写在 `notes/维护手册.md`（允许随时删改，不是规范）。
 
 ---
 
@@ -850,4 +859,24 @@ blocks 41 项（新增 5 项：带 `+` 的块头解析、`+` 未封口标记、�
 | 10 | **取回闸门在调用时判，不改启动即报错**：没有「会话搜索」时插件照常加载，`compress`/`context_map` 被调用时直接停用并用中文说明 | 用户 2026-10-30 裁定「保持现状」。启动即报错在宿主里是静默的（import 失败只写日志、卡片显示未运行），反而更难看懂 | `plugin/index.js` 的 `missingSessionQuery`；§19 |
 
 **设计稿的地位**：`notes/2026-10-27-DSH原生分层压缩-设计方案.md` 是**历史推演**，已在 §0.5 顶部声明不再更新、不再具规范效力。它的价值只剩两样：当初为什么这么选的推演过程，以及几张样张。任何新决定只写进本文件，**不要两边都写**——历史上两边都写的结果是设计稿的表烂了两个月没人发现。
+
+## 27. 真机首轮：`compress` 的参数 schema（0.1.1，2026-10-30）
+
+首次真机运行报：
+
+```
+Invalid schema for function 'compress': true is not of type "array"
+```
+
+整轮请求被拒——插件装上了、工具也注册了，但模型一句话都发不出去。
+
+**成因**：`compress` 的四个键（`l0`/`l1`/`l2`/`l3`）是嵌套对象，0.1.0 在它们的属性上写了 `required: true`。宿主只把**顶层** properties 的布尔 `required` 折成父级数组（`dsh-tools` 的 `parameterSchemaSpecToJsonSchema()`），嵌套层原样透传给 provider；OpenAI 兼容线要求 `required` 是字符串数组，看到 `true` 就整轮失败。
+
+**规则（写代码时照这条）**：
+1. 嵌套对象自身写 `required: ["title","summary"]`（`l0`/`l1`/`l2` 另加 `"to"`），**不要**在嵌套属性上写 `required: true`。
+2. 宿主 raw-schema 边界（`dsh-tools` 的 `assertSupportedJsonSchema()`）：`required` 必须是字符串数组、数组里的名字必须在 `properties` 里声明过、`additionalProperties` 出现时必须是布尔、只许出现 `type`/`oneOf`/`properties`/`required`/`additionalProperties`/`items`/`enum`/`const` + `description`/`title`/`default`/`examples`。
+3. 顶层 `properties` 可以不写 `required`（四个键都可选，模型按需给哪个层）。
+
+**落地**：`plugin/index.js` 的 `blockSpec()`；回归断言在 `plugin/test/prestep.test.mjs` 第 2 项（按上面三条逐节点校验整棵参数树）。**代价提醒**：这类错误的单测全绿也发现不了——只有 provider 会拒；所以任何工具参数结构的改动都要过这条断言。
+
 
