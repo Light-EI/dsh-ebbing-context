@@ -364,7 +364,7 @@ triggerPct: 0.75
 keepTurns: 2                                       // 原文区必须留住的最后 N 轮；to 最多写到「当前轮 − N」
 notice:   { enabled: true, growthTokens: 65000 }
 requireSessionQuery: true
-pruneFirst: true                                   // 剪大工具返回：每步请求前按需一次 + 压缩前一次
+pruneFirst: true                                   // 剪大工具返回：只在每次压缩前剪一次
 foldCallRecord: true                               // 压缩成功后把「调用 + 返回」折成一句短注
 reservedTokens: 0                                  // 读不到这条路由的 maxTokens 时的输出预留兜底
 ```
@@ -377,7 +377,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 
 ## 13. `compress` 的处理顺序
 
-1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`；宿主的剪枝是**全局服务**：任何工具返回超过 `thresholdChars` 8192 字符就挖掉中间、留头 4096 + 尾 1024，只改 `tool/result`，碰不到 `assistant/message` 与 `user/message` ⇒ 压缩块与摘要剪不到）。同一个 pruner 还由插件在**每次 `agent/pre-step`** 里按需调用一次（`maybePrune`：只看尾部 12 个节点，发现超阈值的工具返回才调；剪完 `restate` 续证，因为原位替换会让 `replaceGeneration` 上涨）。宿主自己只在它的自动压缩（context-overflow / pressure）里叫 pruner，关掉自动压缩后就只剩我们这两个调用点 ⇒ 大返回不会一路堆到下次压缩 → 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
+1. 许可证检查 → 2. 参数形状（四个键、`to` 的类型、`title`/`summary` 的长度）→ 3. `pruneFirst`：`ctx.get('toolResultPruner')?.pruneSession(session)`（报 `prunedChars`；宿主的剪枝是**全局服务**：任何工具返回超过 `thresholdChars` 8192 字符就挖掉中间、留头 4096 + 尾 1024，只改 `tool/result`，碰不到 `assistant/message` 与 `user/message` ⇒ 压缩块与摘要剪不到）。同一个 pruner 只有这一个调用点：宿主自己只在它的自动压缩（context-overflow / pressure）里叫它，我们的 `auto` 关着，所以整个世界只有"我们要压缩了"这一刻会剪——**这与宿主的语义同构**：宿主也把剪枝当作压缩的前置步骤（pressure 越过阈值才调，剪完若已低于阈值连压缩都不做）。不在每步请求前剪（设计裁定，用户 m13359）：那样会在任意步削掉模型正要引用的内容，而剪掉的中间段不一定取得回（没装会话搜索时两个工具是停用的，剪枝却不受那道闸门约束）。→ 4. 读区与算层级 → 5. 逐个键解析 `to` 并建区间（其中含"这层还能压"的判据、区间纯度、边界安全、长度与标题校验）→ 6. 区间两两不相交 → 7. **级联校验**（缺层则整批拒绝，并在拒绝语里给出可写的 `to` 范围）→ 8. 全批**预演**（`commitOne(..., dry)`，不落盘，先确认每个键都合法）→ 9. 按表层位置升序逐个子事务落盘（`try/finally` 保证补 `end`）→ 10. 返回结果（每个子事务的块位置、盖掉的条数、省下的 token，以及总量）→ 11. 成功时把本次结果登记为"待折叠"，由**下一次 `agent/pre-step`** 把「这条调用 + 它的返回」一起换成一句短注（`foldCallRecord`，见 §7）。
 
 **多键批失败时要说清落在哪一步**：预演阶段失败则"一条都没写"；落盘阶段失败则把 `result.partial` 里已经写进去的层名列出来（`plugin/index.js` 读 `partial`，不是 `results`）——否则模型会整批重发，把已写的层再压一遍。
 
