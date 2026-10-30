@@ -316,6 +316,11 @@ ctx.on("agent/pre-step", async ({ agent, signal }, next) => {      // dsh-compac
 
 效果：**模型被叫醒后先压缩，用户的下一句话排在它后面**，不用等用户开口。提醒内容里带**完整地图**（块表 + 压缩须知 + 占用），模型不必再单独调 `context_map`。
 
+**提醒是"非用户发言"，必须自己说清楚（2026-10-30 用户 m13801、m13833 指出）**：
+- 正文首行固定是 `〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕`。宿主把这条当 `user/message` 交给模型，不写这一行，模型会把"上下文已用 23%"当成用户给的要求，也分不清"用户刚说完"和"插件把我叫醒"。
+- `source.kind` 用宿主已登记的 **`cordis-host-runner`**（`ref/upstream/installed/host-runner.index.js:2388-2429` 就是官方插件的注入姿势：`agent.steer(createUserMessage({ content, source: { kind: "cordis-host-runner" } }))`）。Client 的 turn-trigger 卡片按这个 kind 选标题与图标——`dsh-client-ui-chat` 的 `chat-client.js:7093` 把它映射到「插件状态更新」+ plugin 图标；自造的 kind 会落到 `:7097` 的 default，显示成默认的「收到执行请求」(`:5764`)，看起来像用户自己发起的请求。
+- **它不会挤掉用户的待发送内容**：用户的草稿是浏览器本地状态；用户运行中按回车发出的插话进的是 inbox 的 `next-step`，我们进的是 `next-turn`，两条车道互不覆盖。宿主认领时是"先取走整个 `next-step`、再取 1 条 `next-turn`"（`dsh-agent-loop/index.js:103` 的 `claim`），所以用户那条一定先被取走。UI 上输入框上方的排队区只画 `next-step` 里 `source.kind === "user"` 的消息（`chat-client.js:2815`），我们的提醒永远不会出现在那里——截图里那张卡是**表层里的 turn-trigger 节点**，位置恰好在输入框上方。
+
 **提醒、拒绝回执、成功回执三处都必须带完整地图**（2026-10-30 用户两次驳回"紧凑版"改动）：完整地图 = 块表（标题 / 覆盖轮次 / 每块 token）+ 每层压力与配额（含"占可用输入"百分比）+ 可压区间 + 压缩须知（含**级联要求**一行：压 l1/l2/l3 时比它浅、且还能压的层要同批一起给，2026-10-30 补——之前地图只给位置不说级联，模型照图只给 l1 会整批被拒）。这三处恰好都是"模型马上要填 `to`"的时刻——
 - **提醒**：靠块标题与块大小决定并哪几块、压完会不会更大；
 - **拒绝回执**：`错误原因 + 地图`，模型才知道错在哪、为什么错，而不是再撞一次；
@@ -330,7 +335,7 @@ ctx.on("agent/pre-step", async ({ agent, signal }, next) => {      // dsh-compac
 - **记账在投递成功之后**（`commit()`）：先记账会让"发送失败"也算发过，于是这一轮白算、下一轮又登记又失败、区越线标志还被白白置位。
 - **压缩成功后要把增长基线重置**（`resetGrowthBaseline`，`plugin/index.js`）：增长触发比的是"自上次提醒后又长了多少"，而 `commit()` 记的是**压缩前**的用量。压缩成功如果不重设基线，基线就永远停在压缩前的高位，`grew` 长期是负数，`notice.growthTokens` 这条触发等于关闭（终检 2026-10-30 抓到的"静默失效"之一）。
 - **认不出块的状态不叫醒**：`st.ambiguous`（映射拿不到 + 已有块）为真时只 `forgetPending` 后返回——叫醒了也压不动，每轮白烧一次请求与一次失败调用的 token，最后把人逼去 `/compact`。
-- **只叫醒一轮**：被叫醒的那一轮（`st.autoTurn === turn`）不再登记第二条——既不再叫醒，也不重复发同一句话。否则模型"读了提醒什么也没压"会让每一轮都再叫醒一次，连环烧钱。用户真开口（`pre-step` 第 1 步认领到的消息里有一条不是我们的 `ebbing-context-notice`）就复位，下一次收尾仍可再叫醒。这是唯一一道刹车，**不是配置项**：它是"别把同一句话说两遍"的硬约束，不是调参面板上的旋钮。
+- **只叫醒一轮**：被叫醒的那一轮（`st.autoTurn === turn`）不再登记第二条——既不再叫醒，也不重复发同一句话。否则模型"读了提醒什么也没压"会让每一轮都再叫醒一次，连环烧钱。用户真开口（`pre-step` 第 1 步认领到的消息里有一条不是我们的 ``cordis-host-runner``）就复位，下一次收尾仍可再叫醒。这是唯一一道刹车，**不是配置项**：它是"别把同一句话说两遍"的硬约束，不是调参面板上的旋钮。
 - **拿不到活 agent（没有 `followup`）**：退化成尾部追加。
 - `agent/turn-stopping` 只在正常收尾时触发（`dsh-agent-loop/index.js:1001`，条件是 `turnEnds && inbox.nextStep.length === 0`）。**派发点写的是字面量 `{ turn, signal }`，但收件人拿到的载荷里一定有 `agent`**：`this.dispatch` 是 `agentEvents(loopCtx, this)`（`dsh-agent-loop/index.js:777`），它的 `emit`/`waterfall` 都先过 `fused(payload) = { ...payload, agent }`（`ref/pkg-0.2.1-rc.3/dsh-agent-index.js:242-246`、`:268-270`；`agent` 就是那个 `AgentLoop` 实例本身，所以能直接调 `agent.followup`）。待发记录仍按 `signal` 登记——信号是本轮的身份（`turn()` 每轮新建一个 `AbortController`，`dsh-agent-loop/index.js:1038`；`pre-step` 与 `turn-stopping` 取的都是 `this.phase.abort.signal`，`:905` / `:1003`），比 agentId 更精确（同一 agent 上一轮的记录不会串到下一轮）。
 - 本轮以异常/取消收场时 `turn-stopping` 不会来，那条记录的信号已经作废：**直接丢弃，不补发**（补发就是拿过期读数说话），交给下一步重新判一次。

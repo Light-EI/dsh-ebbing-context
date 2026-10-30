@@ -81,9 +81,12 @@ function ebbingPrompt(config) {
   ].join('')
 }
 const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
-// 我们自己的提醒用这个来源标记：既让宿主把我当成普通用户消息写进表层，
-// 也让 noteUserSpoke() 能分辨"这一轮是用户开口的"还是"这一轮是我把自己叫醒的"。
-const NOTICE_KIND = 'ebbing-context-notice'
+// 提醒的来源标记。用宿主已登记的 `cordis-host-runner`：Client 的 turn-trigger 卡片
+// 按 source.kind 选标题与图标（dsh-client-ui-chat 的 chat-client.js 里，这个 kind
+// 映射到「插件状态更新」+ plugin 图标）；用自造的 kind 会落回默认的「收到执行请求」，
+// 看起来像用户自己发起的请求。
+// 它同时是 noteUserSpoke() 的判据：这一轮是用户开口的，还是我们自己把自己叫醒的。
+const NOTICE_KIND = 'cordis-host-runner'
 
 export function apply(ctx, rawConfig = {}) {
   // 自己先验一遍：不依赖宿主 schema，加载不到 schemastery 也不会静默放过写错的配置。
@@ -542,6 +545,9 @@ function noticeText(ctx, config, record, count) {
   } catch {}
 
   return (
+    // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
+    // 说清是谁发的、这不是用户发言，模型才不会把提醒里的数字当成用户给的要求。
+    '〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕\n' +
     parts.join('') +
     '现在可以压：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
     '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。' +

@@ -200,6 +200,12 @@ await check('turn-stopping：走 followup 把模型叫醒（不是写进表层�
   const noticeText = String(step.agent.followups[0].content[0].text)
   assert.match(noticeText, /压缩须知/, '提醒里必须带完整地图（须知段）')
   assert.doesNotMatch(noticeText, /能压（to 照抄，别自己数）/, '提醒不能用紧凑版顶替完整地图')
+  // 首行必须自报家门：宿主把这条当 user/message 交给模型，不写明就会被当成用户说的话。
+  assert.match(noticeText.split('\n')[0], /自动提醒/, '提醒首行必须标明是插件注入的自动提醒')
+  assert.match(noticeText.split('\n')[0], /不是用户/, '提醒首行必须说明这不是用户发言')
+  // 来源标记要用宿主已登记的 kind：Client 会把它渲染成「插件状态更新」卡片；
+  // 自造 kind 会落回默认的「收到执行请求」，看着像用户自己发起的请求。
+  assert.equal(step.agent.followups[0].source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
