@@ -2,6 +2,17 @@
 
 本文件只记“对外可见的变化”。规范里每一条规则为什么这么定，见 [`docs/SPEC.md`](docs/SPEC.md)。
 
+## [0.1.3] — 2026-10-30
+
+修一个**每轮都会触发**的收尾崩溃：模型答完之后，界面报「本轮运行失败 next is not a function」。
+
+### 修复
+
+- 插件在 `agent/turn-stopping` 上注册的监听器写成了 `(payload, next) => { … return next() }`。这个事件是宿主用 `dispatch.serial(...)` 派发的，监听器**只收到载荷、没有 `next`**，于是收尾阶段抛 `TypeError: next is not a function`，宿主把整轮判定为失败——回复其实已经生成、用户也看得见，但这一轮被标红。
+- 只有 `waterfall` 事件（`agent/pre-step`、`agent/request-error`）才给 `next`。现在 turn-stopping 的监听器不再接收也不再调用 `next`。
+- 新增回归断言：按宿主的真实派发形状（只传一个参数）调用 turn-stopping handler。之前所有测试都手动传了 `next`，所以这个问题一路漏到了真机。
+- 0.1.0 / 0.1.1 / 0.1.2 都带这个问题，请升级到 0.1.3。
+
 ## [0.1.2] — 2026-10-30
 
 把「剪大工具返回」退回宿主原本的语义：**只在压缩前剪一次**，不再每步请求前剪。

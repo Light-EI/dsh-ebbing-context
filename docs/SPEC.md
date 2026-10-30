@@ -407,6 +407,8 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 
 其中 `agent/turn-stopping` 只做一件事：把本轮攒下的那条提醒在收尾时发出去（见 §9 的投递时机）。派发点的字面量只有 `{ turn, signal }`，但 `agentEvents` 会给每个 agent 事件的载荷补上 `agent`（`ref/pkg-0.2.1-rc.3/dsh-agent-index.js:242-246`），所以收件人手里是有活 agent 的；待发记录仍按 `signal` 登记（`WeakMap<AbortSignal, record>`；另有一张 `Map<agentId, {signal, record}>` 只用于清理异常收场留下的孤儿），因为信号才是本轮的身份。投递走 `agent.followup()`。它是 `serial` 事件，宿主在同一位置还会写 `turn/end`，所以 handler 必须自己兜异常（抛出去会拦掉收尾流程）。
 
+**`serial` 事件的监听器没有 `next` 参数（2026-10-30 真机故障的根因）。** 宿主用 `dispatch.serial(...)` 派发 `agent/turn-stopping`，监听器只收到载荷；写成 `(payload, next) => { … return next() }` 会在收尾阶段抛 `TypeError: next is not a function`，界面上的表现是「模型已经答完，却报 本轮运行失败」。只有 `waterfall` 事件（`agent/pre-step`、`agent/request-error`）才给 `next`。回归断言在 `plugin/test/prestep.test.mjs`：按真实派发方式只传一个参数调用 turn-stopping handler。
+
 **`agent/pre-step` 是什么（别再窄化理解）**：它是宿主的**每步前置瀑布**，每一次请求构造之前都会跑一次（`dsh-agent-loop/index.js:908` 的 `await this.dispatch.waterfall("agent/pre-step", { messages: claimed, ...position, signal })`，`position = { turn, step }`）。宿主自己的 `dsh-compaction-basic` 就在这里压历史。我们借它做三件事：收上一次 compress 的调用记录（折叠）、判定要不要提醒、以及（`step === 1` 时）给被叫醒的那一轮复位闸门。它**不是**"压缩结束后删工具输出"的专用钩子——那只是折叠这一种用法。
 
 `pre-step` 是**被 await 的**：我们算得慢，只会让这一步的请求晚一点发，不会和下一步抢跑、也不会丢事件。`turn-stopping` 是 `serial` 派发，同理。

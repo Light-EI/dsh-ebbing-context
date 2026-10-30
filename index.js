@@ -189,14 +189,17 @@ export function apply(ctx, rawConfig = {}) {
   //   · 正常情况下直接 agent.followup() 排进 inbox 的 next-turn —— 宿主在本轮 turn/end 之后
   //     发现 inbox 有货就立刻开新的一轮，于是模型在用户下一条消息之前就被叫醒去压；
   //   · 这一轮本来就是被叫醒的那轮（或者拿不到 agent）就退化成尾部追加，只留记录、不再连环叫醒。
-  // serial 事件同样要自己兜异常：抛出去会拦掉宿主的收尾流程。
-  ctx.on('agent/turn-stopping', async (payload, next) => {
+  // serial 事件：宿主用 `dispatch.serial(...)` 派发（dsh-agent-loop 的收尾处），
+  // 监听器只收到荷载，**没有 next 参数**。这里若写 `return next()` 就是
+  // `TypeError: next is not a function` —— 收尾阶段抛错会让整轮以失败结束
+  // （真机反馈：模型已经答完，界面却报 "本轮运行失败 next is not a function"）。
+  // 同理要自己兜异常：抛出去会拦掉宿主的收尾流程。
+  ctx.on('agent/turn-stopping', async (payload) => {
     try {
       flushNotice(ctx, config, reminded, pendingBySignal, pendingByAgent, payload, log)
     } catch (error) {
       log('turn-stopping', { error: String((error && error.message) || error) })
     }
-    return next()
   })
 
   // 真的超了：只报一句，不自动压缩、不重试、不改写历史。

@@ -360,4 +360,20 @@ await check('pre-step 不剪枝：超大工具返回原样留着，只有 compre
   assert.equal(pruneCalls.length, 0, 'pre-step 一次都不该叫 pruner')
 })
 
+// 真机故障回归（2026-10-30，用户反馈）：模型已经答完，界面报
+// 「本轮运行失败 next is not a function」。
+// 原因：宿主用 `dispatch.serial(...)` 派发 agent/turn-stopping，监听器只收到荷载，
+// 没有 next 参数；我们却写了 `return next()`，于是收尾阶段抛 TypeError，整轮以失败结束。
+// 这条断言按真实派发方式只传一个参数调用，任何"又去调 next()"的改动都会立刻炸。
+await check('turn-stopping 按 serial 派发只传一个参数：不抛异常，也不依赖 next', async () => {
+  const session = fakeSession([10], [{ role: 'user', content: [{ type: 'text', text: '你好' }] }])
+  const ctx = fakeCtx(session)
+  ctx.tools = { register: () => () => {} }
+  apply(ctx, {})
+  const handler = ctx.handlers.get('agent/turn-stopping')
+  assert.equal(typeof handler, 'function', 'turn-stopping 必须挂上')
+  // 只传 payload —— 与宿主 dispatch.serial 的调用形状一致
+  await handler({ agent: { id: 'a1' }, turn: 3, signal: { aborted: false } })
+})
+
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)
