@@ -458,6 +458,20 @@ function flushNotice(ctx, config, state, bySignal, byAgent, payload, log) {
   deliverNotice(ctx, config, state, record, log)
 }
 
+// inbox 里还挂着的那条我们的提醒（next-turn 车道）。宿主每轮只认领一条 next-turn
+// （`dsh-agent-loop/index.js:103` 的 `claim` 里是 `mutate("next-turn", 0, 1, …)`），
+// 所以同时挂两条会多耗一轮；投递前先看有没有旧的，就地替换。
+function pendingNoticeOf(agent) {
+  try {
+    const list = agent && agent.inbox && agent.inbox.nextTurn
+    if (!Array.isArray(list)) return null
+    for (const message of list) {
+      if (message && message.source && message.source.kind === NOTICE_KIND) return message
+    }
+  } catch {}
+  return null
+}
+
 function deliverNotice(ctx, config, state, record, log) {
   const id = record.agentId
   const session = ctx.sessions.get(id)
@@ -489,6 +503,22 @@ function deliverNotice(ctx, config, state, record, log) {
   // 否则"读了提醒什么也没压"会让每一轮都再叫醒一次，变成连环烧钱。
   const agent = record.agent
   if (agent && typeof agent.followup === 'function' && st.autoTurn !== turn) {
+    // 上一条提醒还躺在 inbox 的 next-turn 里没人认领（例如上一轮以异常收场）：
+    // 直接再塞一条会排成两行，而宿主每轮只认领**一条** next-turn，于是要多花一轮才轮到后面那条。
+    // 这里就地替换：内容换成这次的新读数，队列里始终只有一条我们的提醒。
+    const pending = pendingNoticeOf(agent)
+    if (pending) {
+      try {
+        if (typeof agent.inbox?.replace === 'function' && agent.inbox.replace(pending.id, message)) {
+          st.autoTurn = (typeof turn === 'number' ? turn : 0) + 1
+          commit()
+          log('notice-replaced-pending', { agent: id })
+          return
+        }
+      } catch (error) {
+        log('notice-replace-failed', { agent: id, error: String((error && error.message) || error) })
+      }
+    }
     try {
       agent.followup(message)
       st.autoTurn = (typeof turn === 'number' ? turn : 0) + 1
