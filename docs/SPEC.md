@@ -584,6 +584,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 | `7a01a4f` | 复核表跟上提醒文案（说明式）与 `commitOne` 现状 |
 | `3e2a28e` | **改名**：`dsh-infinity-context` → `dsh-ebbing-context`（Ebbing Context）。只动名字（包名、模块 id、槽位 key、bundle 行、日志名、提示词函数与段落名、locale 标题、文档），不动任何行为；工具名与命令不变 |
 | `v0.1.0`（发布） | 2026-10-30 推送 GitHub：仓库 `Light-EI/dsh-ebbing-context`（由 `dsh-infinity-context` 改名而来），默认分支 `main`，标签 `v0.1.0`，Release 标题注明"未在真机验证"。发布副本在 `ref\_pub\dsh-ebbing-context`，内容 = `plugin/` 全量 + `docs/SPEC.md` + `docs/机制与实现路径.md` + `CHANGELOG.md` + `LICENSE`。仓库当前是 **private**，`package.json` 仍是 `"private": true`（防止误发 npm）；要公开或发 npm 需单独改 |
+| `v0.1.6`（修复） | 真机反馈坐实的成功路径崩溃：`compressTool` 是模块级函数，却在成功分支里引用 `apply()` 的局部名 `reminded` → 每次压缩成功都抛 `ReferenceError`，被 `execute` 外层 `catch` 吞成「压缩时出错了」。四事件其实已落盘，`rememberFold` 被跳过（回执与地图留在表层）。修法：`compressTool(ctx, config, log, foldQueues, reminded)` 改为传入。新增 `plugin/test/scope.test.mjs`（静态扫描：`apply()` 顶层声明名 × 模块级函数体，4 项），并把 `l1`/`l2` 参数说明里的「前 N 块」改成「最老的一块或几块，到 to 指定的那块为止」 |
 
 ### 20.2 三条被澄清的设计前提（写代码前先对照）
 

@@ -126,7 +126,7 @@ export function apply(ctx, rawConfig = {}) {
   const rebuild = () => {
     for (const dispose of rebuilders.splice(0)) { try { dispose() } catch (e) { /* 单个失败不影响其他的重建 */ } }
     rebuilders.push(ctx.effect(() => ctx.tools.register(contextMapTool(ctx, config))))
-    rebuilders.push(ctx.effect(() => ctx.tools.register(compressTool(ctx, config, log, foldQueues))))
+    rebuilders.push(ctx.effect(() => ctx.tools.register(compressTool(ctx, config, log, foldQueues, reminded))))
     const prompt = ctx.get('systemPrompt')
     if (prompt) rebuilders.push(ctx.effect(() => prompt.section({ name: 'ebbing-context', order: 500, text: ebbingPrompt(config) })))
   }
@@ -629,7 +629,7 @@ function contextMapTool(ctx, config) {
   }
 }
 
-function compressTool(ctx, config, log, foldQueues) {
+function compressTool(ctx, config, log, foldQueues, reminded) {
   const titleLimit = (config.title && config.title.maxTokens) || 50
   const seg = config.segment || {}
   return {
@@ -650,9 +650,9 @@ function compressTool(ctx, config, log, foldQueues) {
       type: 'object',
       properties: {
         l3: blockSpec('把整个 L3 区压成一块（不写 to）', false, titleLimit, true),
-        l2: blockSpec('压 L2 区最老的前 N 块', true, titleLimit, false,
+        l2: blockSpec('压 L2 区最老的一块或几块，到 to 指定的那块为止', true, titleLimit, false,
           '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。只能从地图里抄。'),
-        l1: blockSpec('压 L1 区最老的前 N 块', true, titleLimit, false,
+        l1: blockSpec('压 L1 区最老的一块或几块，到 to 指定的那块为止', true, titleLimit, false,
           '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。只能从地图里抄。'),
         l0: blockSpec('压原文区最旧的一段', true, titleLimit, false,
           '写到哪一轮为止：如 T19（压到那轮结束，不会切到轮中）；只能写已经结束、且不在 keepTurns 里的轮；只认地图里的 T 号。'),
