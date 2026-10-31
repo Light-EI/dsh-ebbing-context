@@ -52,3 +52,10 @@ jobs:
           name: ${{ steps.notes.outputs.title }}
           body_path: dist/notes.md
           fail_on_unmatched_files: true
+
+      # action 的 name/body_path 在 Release 已存在时不保证覆盖（0.1.13 实测：正文停在旧内容），
+      # 这里用 gh 再写一次，保证标题与正文就是本版那一节。
+      - name: ensure release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --title "${{ steps.notes.outputs.title }}" --notes-file dist/notes.md
