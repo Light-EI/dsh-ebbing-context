@@ -18,6 +18,7 @@
         notice:
           enabled: true
           growthTokens: 65000
+          forgivePct: 100
         title:
           maxTokens: 50
         requireSessionQuery: true

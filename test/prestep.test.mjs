@@ -249,23 +249,31 @@ await check('只叫醒一轮：被叫醒的那轮不再登记第二条，也不�
   assert.equal(session.appends.length, 0, '同一句话不重复发')
 })
 
-await check('用户真的开口了：闸门复位，下一轮收尾又能叫醒', async () => {
+await check('到线只在越线时报一次：掉回线下再越线才会再报（不在线上反复催）', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, growthTokens: 0 } })
   const s3 = STEP(3)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
-  const s4 = STEP(4, 1, { agent: s3.agent, messages: s3.agent.followups.slice() })
+  assert.equal(s3.agent.followups.length, 1, '越线时报一条')
+  // 一直停在线上面：用户开口了、又过了一轮，也不该再报（用户 m14563）
+  const s4 = STEP(4, 1, { agent: s3.agent, messages: [{ role: 'user', content: [], source: { kind: 'user' } }] })
   await ctx.handlers.get('agent/pre-step')(s4, () => {})
-  // 宿主认领时会从 inbox 里把它摘走（claim 里是 splice remove），这里同步模拟
   s3.agent.inbox.nextTurn = []
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: s4.signal }, () => {})
-  // 用户发了一句话，这一轮的新信号里认领到的是用户那条
-  const s5 = STEP(5, 1, { agent: s3.agent, messages: [{ role: 'user', content: [], source: { kind: 'user' } }] })
+  assert.equal(s3.agent.followups.length, 1, '在线上面不该每轮重复报')
+  // 掉回线下（压缩后），再越线一次 → 重新亮灯
+  session.used = 400
+  session.seq += 1
+  const s5 = STEP(5, 1, { agent: s3.agent })
   await ctx.handlers.get('agent/pre-step')(s5, () => {})
-  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: s5.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 2, '用户开口之后可以再叫醒一次')
+  session.used = 900
+  session.seq += 1
+  const s6 = STEP(6, 1, { agent: s3.agent })
+  await ctx.handlers.get('agent/pre-step')(s6, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 6, signal: s6.signal }, () => {})
+  assert.equal(s3.agent.followups.length, 2, '掉回线下再越线，要重新报一次')
 })
 
 await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞第二条', async () => {
@@ -490,6 +498,162 @@ await check('提醒里明确写了「允许不压」与「压完简短回复」'
   assert.match(text, /这一轮允许什么都不压/, '必须明确允许本轮不采取压缩行动')
   assert.match(text, /压完只回一两句/, '必须要求压完之后简短回复')
   assert.match(text, /还没做完/, '必须点名"没做完的事"作为不压的理由')
+})
+
+// 多层的假会话：能按层造块，也能在测试中途再加一块（用来验证"压得动了"之后的行为变化）。
+function layeredSession(layers, chars, used = 300) {
+  const messages = []
+  const nodes = []
+  let seq = 100
+  const push = (layer) => {
+    const head = `〔${layer}｜T${nodes.length * 2 + 1}–T${nodes.length * 2 + 2}｜ev ${10 + nodes.length}–${20 + nodes.length}〕第 ${nodes.length + 1} 块`
+    messages.push({
+      role: 'user',
+      source: { kind: 'compact-checkpoint' },
+      content: [{ type: 'text', text: head + '\n' + '摘'.repeat(Math.max(1, Math.ceil(chars))) }],
+    })
+    nodes.push(seq++)
+  }
+  for (const layer of layers) push(layer)
+  const session = fakeSession(nodes, messages)
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 1000 })
+  session.used = used
+  session.pushBlock = push
+  return session
+}
+
+await check('区超限的判据：更浅、且有内容的层压不动时，这一层不报', async () => {
+  const { zoneNoticeAllowed } = await import('../index.js')
+  const over = { l1: true, l2: true, l3: true }
+  const has = { l0: true, l1: true, l2: true, l3: true }
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: false, l2: true, l3: true }, has), false, 'L1 有内容却压不动 → L2 不报')
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: true, l2: true, l3: true }, has), true, '全都能压 → 报')
+  // 浅层是空的：不算"不可压"，不许把深层一起拖黑（压缩完只剩块时就是这种形状）
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: false, l1: false, l2: true, l3: true }, { l0: false, l1: false, l2: true, l3: true }), true, '空层不拦')
+  assert.equal(zoneNoticeAllowed('l3', over, { l0: true, l1: true, l2: false, l3: true }, has), false, 'L2 有内容压不动 → L3 不报')
+  assert.equal(zoneNoticeAllowed('l2', over, null, has), true, '拿不到可压状态时不拦')
+})
+
+await check('区超限：L2 满了但 L1 只剩一块（压不动）→ 不叫醒', async () => {
+  const session = layeredSession(['L1', 'L2', 'L2'], 300)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 0, '浅层有内容却压不动时，深层的超限提醒没有意义')
+})
+
+await check('区超限：浅层是空的，深层照样报', async () => {
+  const session = layeredSession(['L2', 'L2'], 300)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 1)
+  assert.match(String(step.agent.followups[0].content[0].text), /L2 区已超设计容量/)
+})
+
+await check('增长触发没东西可压：门槛砍到一半、基线前移，压得动时按半个门槛再报', async () => {
+  const session = layeredSession(['L1'], 20, 500)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
+  const t1 = STEP(1)
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 700
+  session.seq += 1
+  const t2 = STEP(2, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal, agent: t1.agent }, () => {})
+  t2.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 0, '一层都压不动：不叫醒')
+  // 现在压得动了：再长 60（只有原门槛 100 的 60%，靠的是被砍半后的 50）
+  session.pushBlock('L1')
+  session.used = 760
+  session.seq += 1
+  const t3 = STEP(3, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t3, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal, agent: t1.agent }, () => {})
+  t3.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 1, '砍半之后，再长半个门槛就该报')
+})
+
+await check('本轮决定不压：按 forgiving 百分比退回增长额度（100 = 全额退回）', async () => {
+  const session = layeredSession(['L1', 'L1'], 20, 500)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, forgivePct: 100 } })
+  const t1 = STEP(1)
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 700
+  session.seq += 1
+  const t2 = STEP(2, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal, agent: t1.agent }, () => {})
+  t2.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 1, '增长触发叫醒一次')
+  // 模型被叫醒后没有压（表层没动），这一轮收尾按 100% 退回
+  session.used = 750
+  session.seq += 1
+  const t3 = STEP(3, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t3, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal, agent: t1.agent }, () => {})
+  t3.agent.inbox.nextTurn = []
+  // 只再长 50（不到原门槛 100）→ 不该再叫醒
+  session.used = 800
+  session.seq += 1
+  const t4 = STEP(4, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t4, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal, agent: t1.agent }, () => {})
+  t4.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 1, '退满 100% 之后，要重新攒满一个门槛才会再报')
+})
+
+await check('本轮决定不压：forgivePct = 0 时一分不退，下一轮接着报', async () => {
+  const session = layeredSession(['L1', 'L1'], 20, 500)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, forgivePct: 0 } })
+  const t1 = STEP(1)
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 700
+  session.seq += 1
+  const t2 = STEP(2, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal, agent: t1.agent }, () => {})
+  t2.agent.inbox.nextTurn = []
+  session.used = 750
+  session.seq += 1
+  const t3 = STEP(3, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t3, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal, agent: t1.agent }, () => {})
+  t3.agent.inbox.nextTurn = []
+  session.used = 800
+  session.seq += 1
+  const t4 = STEP(4, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t4, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal, agent: t1.agent }, () => {})
+  t4.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 2, '一分不退：攒够原门槛就再报一次')
+})
+
+await check('区超限与增长同一轮都成立：合并成一条提醒，不打架', async () => {
+  const session = layeredSession(['L1', 'L1'], 300, 500)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
+  const t1 = STEP(1)
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 700
+  session.seq += 1
+  const t2 = STEP(2, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal, agent: t1.agent }, () => {})
+  t2.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 1, '两条理由合成一条提醒')
+  const text = String(t1.agent.followups[0].content[0].text)
+  assert.match(text, /L1 区已超设计容量/, '区超限要写在同一条里')
+  assert.match(text, /又长了/, '增长也要写在同一条里')
+  assert.match(text, /允许什么都不压/, '每条提醒都要写明可以不压')
 })
 
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

@@ -308,14 +308,19 @@ ctx.on("agent/pre-step", async ({ agent, signal }, next) => {      // dsh-compac
 
 | 触发 | 频率 | 文案要点 |
 |---|---|---|
-| 占用 ≥ `triggerPct`（0.75） | 每轮一条（同一轮多步只发一条） | 说明式（**不是命令式**，m08640）：现在可以压、位置在下面这张地图里；附当前地图；第二次起因"上次压完仍高于线"换说法 |
-| 自上次提醒后又长了 `notice.growthTokens`（65000） | 每触发一次发一条 | 写 **0 表示关闭这条触发**（只在到线时提醒）；能写 0 但不能写负数。**一层都压不动时不发**（m14280 第 2 条，见下） |
-| 某层区超 `budget.*` | 每层首次越线发一条，回落复位 | 说清前提：超的是哪区、要压就得连下面几层一起压。**只有这一层真的压得动时才发**（m14280 第 1 条，见下） |
+| 占用 ≥ `triggerPct`（0.75） | **只在越线时报一条**（停在线上不重复，掉回线下再越线才再报，m14563） | 说明式（**不是命令式**，m08640）：现在可以压、位置在下面这张地图里；附当前地图 |
+| 自上次提醒后又长了 `notice.growthTokens`（65000） | 每攒够一次门槛发一条；灯亮着才算数 | 写 **0 表示关闭这条触发**（只在到线时提醒）；能写 0 但不能写负数。**一层都压不动时不发，门槛砍半、基线前移**（m14280 第 2 条、m14431 第 2 条） |
+| 某层区超 `budget.*` | 每层首次越线发一条，回落复位 | 说清前提：超的是哪区。**这一层压得动、且比它浅且有内容的层也压得动时才发**（m14280 第 1 条、m14431 第 1 条） |
 
-**只在"真的压得动"时才开口（2026-10-31，用户 m14280）**：一条提醒的真实代价是叫醒模型开一整轮（请求 + 可能的失败调用 + 提醒正文永久进历史）。所以每轮扫区时顺带算一次"哪一层压得动"（`canCompressZone`，存在 `st.compressible`）：
-- **区超限**：只在 `compressible[key]` 为真时才进理由表。某层只剩最后一块（`l1`/`l2` 不足 2 块）、或 `l0` 的轮次大纲坏了判不出可压区间时，报出来也只是让模型撞一次拒绝——那正是把人逼去 `/compact` 的路。
-- **纯增长触发**：`l0/l1/l2/l3` 一个都压不动时整条理由不发（到线那条照发：它还承担"告诉用户这一版压完了"的职责）。
+**只在"真的压得动"时才开口（2026-10-31，用户 m14280 / m14431）**：一条提醒的真实代价是叫醒模型开一整轮（请求 + 可能的失败调用 + 提醒正文永久进历史）。所以每轮扫区时顺带算一次"哪一层压得动"（`canCompressZone`，存在 `st.compressible`）与"哪一层还有内容"（`st.zoneHas`）：
+- **区超限**：这一层要压得动，**而且比它浅、还有内容的层也必须全都压得动**（`zoneNoticeAllowed`）。浅层有内容却压不动（只剩最后一块、`l0` 的轮次大纲坏了）时，这条提醒只会换来一次拒绝。浅层是空的则不算"不可压"——空层本来就不进这一批，不许拿它把深层一起拖黑（压缩过的会话只剩块，就是这种形状）。反过来（深一层满、浅层没满）照报浅层那条，地图上会写着深层不可压，模型不会硬去压它。
+- **纯增长触发**：`l0/l1/l2/l3` 一个都压不动时整条理由不发，且**门槛砍到原额的一半、基线前移到当前量**（用户 m14431 第 2 条）——不是把这次增长丢掉，而是再长半个门槛就重新判一次；一直压不动就一直按半个门槛判，不会把这条触发饿死。压得动时点灯（`st.growthLamp`），收尾那一步才真发。
 - 读不到表层（`readZones` 抛错）时按"未知"处理：不因此静默，免得真该提醒时反而不响。
+
+**增长额度怎么退（2026-10-31，用户 m14431 第 3、4 条）**：
+- 增长提醒发出去之后，模型还有一整轮决定压不压；到那轮收尾仍没压，就按 `notice.forgivePct`（默认 100）把这段增长退回额度：100 = 全额退回（等于重新攒满一个门槛）、50 = 只退一半、0 = 一分不退（下一轮接着报）。判据是 `st.growthPending` 与 `turn` 的比较，`settleGrowth` 在 `agent/turn-stopping` 里跑。
+- **任何原因触发的压缩都重置增长状态**（`resetGrowthBaseline`）：基线对齐当前用量、`growthQuota` 回原额、指示灯熄灭、待结算清空。
+- 到线提醒与区超限是**越线触发**（亮灯一次、回落复位），停在线上不重复报——"还在长"这件事由增长那条负责。
 
 **提醒必须允许模型不压（2026-10-31，用户 m14280 第 3 条）**：提醒是"要不要压"的入口，不是"必须压"的命令。正文里固定包含两层意思——① 要压掉的那几轮里如果还有没做完的事（目标没收尾、todo 没打完、还在验证、等用户拍板），或者内容马上还要用，就留着别动，**这一轮允许什么都不压**；② 压完只回一两句（压了哪几层、省了多少、现在占用多少），不复述摘要。不压也要回一句为什么，不许沉默、不许假称压过了。
 
@@ -374,14 +379,14 @@ segment:  { l1: 5000, l2: 2000, l3: 5000 }        // 产物层的单块正文上
 title:    { maxTokens: 50 }
 triggerPct: 0.75
 keepTurns: 2                                       // 原文区必须留住的最后 N 轮；to 最多写到「当前轮 − N」
-notice:   { enabled: true, growthTokens: 65000 }
+notice:   { enabled: true, growthTokens: 65000, forgivePct: 100 }
 requireSessionQuery: true
 pruneFirst: true                                   // 剪大工具返回：只在每次压缩前剪一次
 foldCallRecord: true                               // 压缩成功后把「调用 + 返回」折成一句短注
 reservedTokens: 0                                  // 读不到这条路由的 maxTokens 时的输出预留兜底
 ```
 
-**这 15 个叶子（budget 3 / segment 3 / title 1 / notice 2 / triggerPct / keepTurns / pruneFirst / foldCallRecord / requireSessionQuery / reservedTokens）必须全部出现在宿主的 `Config` schema 里、并且逐个 `.volatile()`。** 只写进 `DEFAULTS` 与 `validateConfig` 是不够的：宿主按 schema 解析配置，schema 里没有的键会被丢掉或拒绝，面板与 YAML 改了都不生效——`keepTurns` 就曾漏了 schema 而永远停在 2（`e15ec16` 补上）。
+**这 16 个叶子（budget 3 / segment 3 / title 1 / notice 3 / triggerPct / keepTurns / pruneFirst / foldCallRecord / requireSessionQuery / reservedTokens）必须全部出现在宿主的 `Config` schema 里、并且逐个 `.volatile()`。** 只写进 `DEFAULTS` 与 `validateConfig` 是不够的：宿主按 schema 解析配置，schema 里没有的键会被丢掉或拒绝，面板与 YAML 改了都不生效——`keepTurns` 就曾漏了 schema 而永远停在 2（`e15ec16` 补上）。
 
 长度一律用**插件自带的估算器**（中日韩 1 字=1 token，其他非 ASCII 1，ASCII 数字 3 位=1，ASCII 其他 4 个=1），不用宿主的 `CHARS_PER_TOKEN=4`——它对中文低估约 4 倍。
 
@@ -706,7 +711,7 @@ interface ConfigPageForm {
 ### 21.3 我们的实现
 
 - `plugin/client.js`：`window.__ModuleLoader__.load({ id: 'dsh-ebbing-context', factory(require) {...} })`，在 `apply` 里 `ctx.slots.inject('plugins.row.config', ...)`（**不是** `plugins.bundle.config`：bundle 详情页 `renderSlot(..., { view: 'page' })` 不传 `form`，只有行详情页传 `{ view: 'page', form }`；key 用 `<包名>#<行 id>`） + `ctx.slots.register({ name, key })`（模板见 `templates/decoration/client.js`；`dsh.client` 段与 `./client` 导出见 `templates/decoration/package.json`）。
-- **15 个控件**：budget 3（占比）、segment 3 + title 1（单块上限）、notice 2（开关 + 增长阈值）、`triggerPct`、`keepTurns`、`pruneFirst`、`foldCallRecord`、`requireSessionQuery`、`reservedTokens`。每项都是一个 `volatile` 叶子（见 §21.1 的 `volatileForm` 要求）。
+- **16 个控件**：budget 3（占比）、segment 3 + title 1（单块上限）、notice 3（开关 + 增长阈值 + 不压时退回多少额度）、`triggerPct`、`keepTurns`、`pruneFirst`、`foldCallRecord`、`requireSessionQuery`、`reservedTokens`。每项都是一个 `volatile` 叶子（见 §21.1 的 `volatileForm` 要求）。
 - **草稿式**：改动只进本地草稿，最下面一个「保存」按钮统一提交；旁边有「放弃修改」与「待保存 N 项」。离开页面不保存。
 - 保存 = 一次 `mutate(ops[], state.revision)`，所有改动**原子生效**：要么全成功，要么全不生效，不会出现改了一半。
 - 提交前先本地校验（必填、数字、最小/最大）；不合法就**不提交**，并在页面顶部横幅列出「哪几项、为什么」。
@@ -875,6 +880,9 @@ blocks 41 项（新增 5 项：带 `+` 的块头解析、`+` 未封口标记、�
 | 10 | **取回闸门在调用时判，不改启动即报错**：没有「会话搜索」时插件照常加载，`compress`/`context_map` 被调用时直接停用并用中文说明 | 用户 2026-10-30 裁定「保持现状」。启动即报错在宿主里是静默的（import 失败只写日志、卡片显示未运行），反而更难看懂 | `plugin/index.js` 的 `missingSessionQuery`；§19 |
 | 11 | **提醒只在"真的压得动"时才发**：区超限要求那一层 `canCompressZone` 为真；纯增长触发要求至少有一层压得动 | 用户 m14280 第 1、2 条。叫醒了却压不动 = 每轮白烧一次请求 + 一次失败调用，最终把人逼去 `/compact` | `plugin/index.js` 的 `remindIfNeeded()`（`st.compressible`）；§9；测试 `plugin/test/prestep.test.mjs` 第 17–19 项 |
 | 12 | **提醒必须允许本轮不压，并要求压完简短回复** | 用户 m14280 第 3 条：「可压内容未完成、或者比较重要，就不要压缩，本轮允许不采取压缩行动。以及压缩完成后简短回复即可。」提醒是入口不是命令 | `plugin/index.js` 的 `noticeText()`；§9、§22 |
+| 13 | **到线提醒与区超限是"越线才报一次"**：越过时报一条、记住，掉回线下才重新亮灯；停在上面不重复催 | 用户 m14563：「每一次区越线只在越线时候报一次，总上下文长度也一样」。"还在长"这件事交给增长那条，别用同一条提醒每轮催 | `plugin/index.js` 的 `st.lineOn` / `st.zones` 与 `remindIfNeeded()`；§9；测试 `plugin/test/prestep.test.mjs` 第 8 项 |
+| 14 | **区超限要连浅层一起看**：深层要报，必须"比它浅、且有内容的层"也全都压得动；浅层是空的则不算拦 | 用户 m14431 第 1 条：「Ln满了，但是Ln的后面层还不可压就不发送任何提示」；浅层压不动时报了也只能换来一次拒绝。空层不进这一批，不许拿它拖黑深层 | `plugin/index.js` 的 `zoneNoticeAllowed()`；§9；测试 `plugin/test/prestep.test.mjs` 第 21–23 项 |
+| 15 | **增长触发：压不动就砍半，不压就按 `forgivePct` 退额度；任何压缩都清空** | 用户 m14431 第 2、3、4 条：压不动时门槛砍到一半、基线前移、直到指示灯亮；模型选择不压则按 N%（默认 100）退回；任何原因触发的压缩都重置增长提示 | `plugin/index.js` 的 `remindIfNeeded()` / `settleGrowth()` / `resetGrowthBaseline()`；`notice.forgivePct`；§9、§12；测试 `plugin/test/prestep.test.mjs` 第 24–27 项 |
 
 **设计稿的地位**：`notes/2026-10-27-DSH原生分层压缩-设计方案.md` 是**历史推演**，已在 §0.5 顶部声明不再更新、不再具规范效力。它的价值只剩两样：当初为什么这么选的推演过程，以及几张样张。任何新决定只写进本文件，**不要两边都写**——历史上两边都写的结果是设计稿的表烂了两个月没人发现。
 

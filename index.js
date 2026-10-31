@@ -48,6 +48,8 @@ try {
     notice: Schema.object({
       enabled: V(Schema.boolean().default(DEFAULTS.notice.enabled)),
       growthTokens: V(Schema.number().min(0).default(DEFAULTS.notice.growthTokens)),
+      // 提醒过一轮、模型选择"这一轮不压"时退回多少增长额度（%）。100 = 全额退回。
+      forgivePct: V(Schema.number().min(0).max(100).default(DEFAULTS.notice.forgivePct)),
     }).default(DEFAULTS.notice),
     reservedTokens: V(Schema.number().min(0).default(DEFAULTS.reservedTokens)),
     // 少了这一行，宿主解析出的 config 里根本没有这个键：面板与 YAML 改了都不生效，
@@ -200,6 +202,9 @@ export function apply(ctx, rawConfig = {}) {
   ctx.on('agent/turn-stopping', async (payload) => {
     try {
       flushNotice(ctx, config, reminded, pendingBySignal, pendingByAgent, payload, log)
+      // 先发再结算：刚发出去的那条会把 growthPending 记成本轮，这里看到 turn <= pending 就跳过；
+      // 真正要结算的是"上一轮发的提醒，这一轮还没压"。
+      settleGrowth(ctx, config, reminded, payload, log)
     } catch (error) {
       log('turn-stopping', { error: String((error && error.message) || error) })
     }
@@ -366,8 +371,14 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
     return
   }
   const grew = usage.used - st.tokens
-  const onLine = usage.ratio >= config.triggerPct && st.turn !== turn
-  const onGrowth = config.notice.growthTokens > 0 && grew >= config.notice.growthTokens
+  // 到线提醒同样是"越线才报一次"（用户 m14563）：越过那条线时亮灯、报一条就记住，
+  // 掉回线下再熄灭；一直停在线上面不会每轮重复报——增长那条负责"还在长"的后续提醒。
+  const aboveLine = usage.ratio >= config.triggerPct
+  if (!aboveLine) st.lineOn = false
+  const onLine = aboveLine && !st.lineOn
+  // 增长门槛可能是"原额"，也可能是上一次没压成时被砍到的一半（用户 m14431 第 2 条）。
+  const growthQuota = typeof st.growthQuota === 'number' ? st.growthQuota : config.notice.growthTokens
+  const onGrowth = growthQuota > 0 && grew >= growthQuota
 
   // 区超限要全量扫一遍日志，所以每轮最多扫一次；同一轮后面几步复用这次结果，
   // 既省重复扫描，也免得同一条提醒在几步之间理由来回变。
@@ -389,9 +400,17 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
         l2: canCompressZone(zones, 'l2', keepTurns),
         l3: canCompressZone(zones, 'l3', keepTurns),
       }
+      // "这一层还有内容吗"：区分"空层"与"有内容但压不动"。空层不该被当成不可压的拖累。
+      st.zoneHas = {
+        l0: (zones.zones.l0 || []).length > 0,
+        l1: (zones.zones.l1 || []).length > 0,
+        l2: (zones.zones.l2 || []).length > 0,
+        l3: (zones.zones.l3 || []).length > 0,
+      }
     } catch {
       st.ambiguous = false
       st.compressible = null
+      st.zoneHas = null
     }
   }
   if (st.ambiguous) {
@@ -400,17 +419,30 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
   }
   const zoneOver = st.zonesOver || {}
   const compressible = st.compressible || null
+  const zoneHas = st.zoneHas || null
   const anyCompressible = compressible ? Object.values(compressible).some(Boolean) : true
 
   const reasons = []
   if (onLine) reasons.push('line')
   // 纯增长触发：一个可压的层都没有时闭嘴（用户 m14280 第 2 条）。
-  // 到线那条不在此列——它同时承担"告诉用户这一版压完了"的职责，不能说没就没。
-  if (onGrowth && anyCompressible) reasons.push('growth')
+  // 但闭嘴不等于把这次增长丢掉：把门槛砍到原额的一半、基线前移到当前，
+  // 再长半个额度就重新判一次（用户 m14431 第 2 条）。一直砍不下去说明内容还在长，
+  // 而每次只多等半个门槛，不会因为"一直压不动"就把这条触发彻底饿死。
+  if (onGrowth) {
+    if (anyCompressible) {
+      // 增长指示灯：到量且真压得动才亮。收尾那一步发不发，就看这一格。
+      st.growthLamp = true
+    } else if (typeof st.growthQuota !== 'number' || st.growthQuota > Math.max(1, Math.round(config.notice.growthTokens * 0.5))) {
+      st.growthLamp = false
+      st.growthQuota = Math.max(1, Math.round(config.notice.growthTokens * 0.5))
+      st.tokens = usage.used
+    }
+  }
+  if (onGrowth && st.growthLamp) reasons.push('growth')
+  // 区超限：要报的那一层，比它浅的层必须全都压得动（用户 m14431 第 1 条）。
+  // 深一层满、浅层没满时照报浅层那条；地图上写着深层不可压，模型不会硬去压它。
   for (const key of ['l1', 'l2', 'l3']) {
-    // 区超限只报"这一层真的压得动"的（用户 m14280 第 1 条）：
-    // 某层只剩最后一块、或大纲坏了导致判不了，报出来也只是让模型撞一次拒绝。
-    const worthTelling = !!zoneOver[key] && (!compressible || compressible[key])
+    const worthTelling = zoneNoticeAllowed(key, zoneOver, compressible, zoneHas)
     if (worthTelling && !st.zones[key]) reasons.push('zone-' + key)
     // 掉回线下就复位：否则某个区一旦报过一次，这个会话里就再也不报了
     // （只压某一层的工作流里，模型压小后再次越线会彻底静默）。
@@ -431,8 +463,32 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
   byAgent.set(id, { signal: payload.signal, record })
 }
 
+// 区超限要不要报：比它浅、**而且还有内容**的层必须全都压得动（用户 m14431 第 1 条）。
+// 道理：压深层要把上面还能压的层同批给出去；浅层有内容却压不动时，这条提醒只能换来一次拒绝。
+// 浅层是空的则不算"不可压"——空层本来就不用进这一批，不许拿它把深层一起拖黑。
+// 反过来（深一层满、浅层没满）照报浅层那条：地图上会写着深层不可压，模型不会硬去压它。
+const SHALLOWER = { l1: ['l0'], l2: ['l0', 'l1'], l3: ['l0', 'l1', 'l2'] }
+
+export function zoneNoticeAllowed(key, zoneOver, compressible, hasContent) {
+  if (!zoneOver || !zoneOver[key]) return false
+  // 拿不到哪一层压得动（读表层失败）：不拦，宁可多报一次也别静默。
+  if (!compressible) return true
+  if (!compressible[key]) return false
+  return SHALLOWER[key].every((k) => !(hasContent && hasContent[k]) || compressible[k])
+}
+
 function newState() {
-  return { turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null, autoTurn: null, ambiguous: false, compressible: null }
+  return {
+    turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null,
+    autoTurn: null, ambiguous: false, compressible: null, zoneHas: null, lineOn: false,
+    // 增长这条触发自己的两格状态（用户 m14431 第 2 条）：
+    // growthQuota = 当前门槛（null 表示用配置里的原额；压不动时砍到一半）
+    // growthLamp  = 增长指示灯（亮着表示"已经在等模型动手"，收尾那步才发得出去）
+    growthQuota: null,
+    growthLamp: false,
+    // 增长提醒发出去的那一轮：下一轮收尾时如果还没压，就按 forgivePct 退额度。
+    growthPending: null,
+  }
 }
 
 function forgetPending(bySignal, byAgent, id, signal) {
@@ -440,6 +496,31 @@ function forgetPending(bySignal, byAgent, id, signal) {
   if (record && record.agentId === id) bySignal.delete(signal)
   const entry = byAgent.get(id)
   if (entry && (!signal || entry.signal === signal)) byAgent.delete(id)
+}
+
+// 增长提醒发出去之后，模型还有一整轮时间决定压不压。到那轮收尾时仍然没压，
+// 就按 notice.forgivePct 把这段增长退回额度里（用户 m14431 第 3 条）：
+//   · 100（默认）= 全额退回，等于重新攒满一个门槛才会再提醒；
+//   · 50 = 只退回一半，剩下一半继续算数，下一轮更容易再亮灯；
+//   · 0 = 一分不退，下一轮接着提醒（模型每轮都能看到"又长了"）。
+// 不做这一步的话，基线停在提醒那一刻，模型只要一直不压，增长这条就每轮都成立，
+// 变成"每轮叫醒一次"的连环烧钱。
+function settleGrowth(ctx, config, state, payload, log) {
+  const id = payload.agent && payload.agent.id
+  if (!id) return
+  const st = state.get(id)
+  if (!st || st.growthPending === null) return
+  const turn = typeof payload.turn === 'number' ? payload.turn : null
+  // 还在被叫醒的那一轮里：给它这一步的时间，收尾时才结算。
+  if (turn === null || turn <= st.growthPending) return
+  const session = ctx.sessions.get(id)
+  const usage = session ? readUsage(ctx, session, config) : null
+  const raw = config.notice && config.notice.forgivePct
+  const pct = typeof raw === 'number' && Number.isFinite(raw) ? Math.min(100, Math.max(0, raw)) : 100
+  if (usage) st.tokens = st.tokens + (usage.used - st.tokens) * (pct / 100)
+  st.growthPending = null
+  st.growthLamp = false
+  log('growth-forgiven', { agent: id, turn, forgivePct: pct })
 }
 
 // turn-stopping 没来（这一轮以异常/取消收场）：那条记录的信号已经作废，
@@ -512,6 +593,9 @@ function deliverNotice(ctx, config, state, record, log) {
     st.count = record.count
     st.tokens = record.usage.used
     for (const key of ['l1', 'l2', 'l3']) st.zones[key] = !!(record.zoneOver && record.zoneOver[key])
+    // 增长这条路：记下"哪一轮发的"，下一轮收尾时据此判断模型有没有动手（见 settleGrowth）。
+    if (record.reasons.includes('line')) st.lineOn = true
+    if (record.reasons.includes('growth')) st.growthPending = turn
   }
 
   // 叫醒模型立刻压（用户 m10194）：followup 只是把消息排进 inbox 的 next-turn，
@@ -563,7 +647,10 @@ function noticeText(ctx, config, record, count) {
   const line = Math.round(config.triggerPct * 100)
   const parts = []
   if (reasons.includes('line')) parts.push(`上下文已用 ${pct}%，到了 ${line}% 的提醒线。`)
-  if (reasons.includes('growth')) parts.push(`距上次提醒又长了约 ${fmt(grew)} token（现在 ${pct}%）。`)
+  if (reasons.includes('growth')) {
+    parts.push(`距上次提醒又长了约 ${fmt(grew)} token（现在 ${pct}%）。`)
+    parts.push('这次是「又长了」触发的提醒，不是催你：要压的那几轮如果还没做完、或者内容比较重要，就直接说这一轮不压，按原计划继续。')
+  }
   if (count >= 2 && (reasons.includes('line') || reasons.includes('growth'))) {
     parts.push('距上次提醒又过了一段：如果占用没降，说明上次压得不够；如果降过又涨回来，是新增内容太快。')
   }
@@ -759,6 +846,11 @@ function resetGrowthBaseline(ctx, agent, config, state) {
     if (!session) return
     const usage = readUsage(ctx, session, config)
     if (usage && typeof usage.used === 'number') st.tokens = usage.used
+    // 任何原因触发的压缩都算"已经处理过增长"（用户 m14431 第 4 条）：
+    // 额度回到原额、指示灯熄灭、待结算清空。留着旧的半额门槛会让下一次提醒来得莫名其妙。
+    st.growthQuota = null
+    st.growthLamp = false
+    st.growthPending = null
   } catch {}
 }
 
