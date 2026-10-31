@@ -43,6 +43,14 @@ reject('triggerPct 超出范围', { triggerPct: 1.5 }, 'triggerPct 不能大于'
 accept('空配置', {})
 accept('只写 budget.l1', { budget: { l1: 0.1 } })
 accept('只写 title.maxTokens', { title: { maxTokens: 60 } })
+// 不压时退回多少增长额度（用户 m14431 第 3 条）：0~100 的百分数，默认 100
+accept('notice.forgivePct = 0（一分不退）', { notice: { forgivePct: 0 } })
+accept('notice.forgivePct = 50（退一半）', { notice: { forgivePct: 50 } })
+reject('notice.forgivePct 超值', { notice: { forgivePct: 120 } }, 'notice.forgivePct 不能大于')
+if (DEFAULTS.notice.forgivePct !== 100) {
+  console.error('FAIL DEFAULTS.notice.forgivePct 应为 100（默认全额退回）')
+  failed++
+}
 // 语言项已整体删除：再写 lang 必须被当成未知子键拒绝
 reject('title.lang 已删除', { title: { lang: 'en' } }, 'title.lang 不认识')
 // 深合并的前提：默认值本身是完整的（缺了它，只写 lang 会把 maxTokens 一起吃掉）
@@ -55,4 +63,4 @@ if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
 }
-console.log('config 断言测试全部通过（' + 11 + ' 项）')
+console.log('config 断言测试全部通过（' + 14 + ' 项）')
