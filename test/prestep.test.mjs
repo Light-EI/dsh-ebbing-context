@@ -578,6 +578,22 @@ await check('增长触发没东西可压：门槛砍到一半、基线前移，�
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal, agent: t1.agent }, () => {})
   t3.agent.inbox.nextTurn = []
   assert.equal(t1.agent.followups.length, 1, '砍半之后，再长半个门槛就该报')
+  // 模型这次仍然没压：下一轮收尾结算，门槛要放回原额（用户 m14797：
+  // 「只要成功压缩就返还 100% 额度，不要搞得之后全部只剩一半额度」）。
+  session.used = 770
+  session.seq += 1
+  const t4 = STEP(4, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t4, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal, agent: t1.agent }, () => {})
+  t4.agent.inbox.nextTurn = []
+  // 再长 60（够半个门槛、不够原门槛）：不该再叫醒，说明门槛已经回到 100 而不是停在 50。
+  session.used = 830
+  session.seq += 1
+  const t5 = STEP(5, 1, { agent: t1.agent })
+  await ctx.handlers.get('agent/pre-step')(t5, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal, agent: t1.agent }, () => {})
+  t5.agent.inbox.nextTurn = []
+  assert.equal(t1.agent.followups.length, 1, '结算之后门槛回原额：只长半个门槛不该再叫醒')
 })
 
 await check('本轮决定不压：按 forgiving 百分比退回增长额度（100 = 全额退回）', async () => {
