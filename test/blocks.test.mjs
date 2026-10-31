@@ -151,14 +151,21 @@ const farCtx = {
     ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }, { turn: 3, seq: 500 }] }) }
     : null),
 }
-check('当前轮在表层上一个节点都没有（大纲超前）能认出来', readZones(farCtx, session).outlineFault === 'current')
+// 2026-10-31 审计 F1：'current' 不是故障（宿主每轮第 1 步都这样），只记成 currentEmpty。
+const far = readZones(farCtx, session)
+check('当前轮还没有节点时不算大纲故障（那是宿主的正常时序）', far.outlineFault === null, String(far.outlineFault))
+check('当前轮还没有节点时 currentEmpty 为真（地图据此说这一轮还没内容）', far.currentEmpty === true)
 check('大纲正常时没有 fault', zones.outlineFault === null, String(zones.outlineFault))
 
 // 大纲不可靠时 l0 必须算「压不了」：否则级联会一直要求带上一个必然被拒的 l0，
 // 连带把 l1 / l2 / l3 一起锁死（整会话压不动），而地图还在说「l1 / l2 不受影响」。
 check('大纲缺轮时 l0 不算可压（级联不该逼着带它）', canCompressZone(gapZones, 'l0', 0) === false)
 check('大纲缺轮时 l1 照旧看块数（不被 l0 连坐）', canCompressZone({ ...fake, outlineFault: 'gap' }, 'l1', 0) === true)
-check('当前轮无节点时 l0 也不算可压', canCompressZone(readZones(farCtx, session), 'l0', 0) === false)
+// 正文放大到门槛之上：l0 还要过"压了能不能比原文小"的收益门槛（MIN_L0_COST）。
+const fatSession = { surface: { nodes: session.surface.nodes }, deriveMessages: () => session.deriveMessages().map((m) => ({ ...m, content: [{ type: 'text', text: '长'.repeat(1200) }] })) }
+const thinSession = { surface: { nodes: session.surface.nodes }, deriveMessages: () => session.deriveMessages().map((m) => ({ ...m, content: [{ type: 'text', text: '短' }] })) }
+check('当前轮还没有节点时 l0 照常可压（不再被伪故障拦下）', canCompressZone(readZones(farCtx, fatSession), 'l0', 0) === true)
+check('原文区剩余不足门槛：l0 不算可压（压了也会被收益校验拒）', canCompressZone(readZones(farCtx, thinSession), 'l0', 0) === false)
 
 // 空节点让 messages 比 nodes 少一条：
 //  - 表层没有块 → 每条消息都是原文，按下标分类与对齐无关，整表按原文处理即可（保住可压性）；

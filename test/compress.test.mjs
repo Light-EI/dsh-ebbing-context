@@ -4,7 +4,7 @@
 // 块是按块头分层的，块头层级与位置不一致时，l1/l2/l3 的第一块到最后一块之间
 // 可能夹着原文甚至当前轮。这里直接用假 zones 喂样例，不碰宿主。
 
-import { impureRange, imageLedger } from '../lib/compress.js'
+import { impureRange, imageLedger, boundaryLine } from '../lib/compress.js'
 
 let total = 0
 let failed = 0
@@ -73,6 +73,26 @@ check('没有图片时不写台账行', none.line === '' && none.seqs.length ===
 
 const noMapper = imageLedger({}, [21])
 check('拿不到逐节点消息时不算图片（不报错、不写行）', noMapper.line === '', JSON.stringify(noMapper))
+
+// 上一层只列前 6 个事件号，但"张数"必须是真数：合并时按它写的总数接手，
+// 而不是按它列出来的几个号重算（审计 H1：100 张会被缩成 6 张）。
+const bigLedger = '〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要看图时用会话搜索按事件号查看。〕'
+const inherited = imageLedger({ messageFor: (seq) => (seq === 50 ? { content: [{ type: 'text', text: bigLedger }] } : null) }, [50])
+check('合并旧块时台账张数取上一层总数（不按列出的号数重算）', inherited.count === 100, String(inherited.count))
+check('合并后台账行仍写真实张数', inherited.line.includes('100 张图片'), inherited.line)
+
+// 交界声明：压 l0 才会写，且轮号是 to+1。
+// 为什么必须有：压完之后，原本标着「下一轮 T16」的那条轮次标记被并进了块里，
+// 交界处就再也没有轮号了——模型会分不清紧挨着的原文是 T16 还是 T16–T17。
+const b0 = boundaryLine('l0', 'T15')
+check('l0 的产物写下交界：其下第一条原文轮次是 to+1', b0.includes('T16') && b0.includes('原文区'), b0)
+check('交界声明标明是"写就时"（以后下面的轮次被压掉也不会变成假话）', b0.includes('本块写就时'), b0)
+check('l1/l2/l3 的产物不写交界（它们不产生新的 L0 边界）', boundaryLine('l1', 'T15') === '' && boundaryLine('l2', 'T1') === '' && boundaryLine('l3', 'T3') === '')
+check('to 不是 T 号时不写（宁可没有，也不写错的轮号）', boundaryLine('l0', '') === '' && boundaryLine('l0', undefined) === '')
+// 空轮（有 turn/start、没有任何表层节点）会让 to+1 指空：必须取块后第一个真有原文的轮。
+const gapZones = { zones: { l0: [{ seq: 1, turn: 16 }, { seq: 2, turn: 18 }] } }
+const bGap = boundaryLine('l0', 'T17', gapZones)
+check('交界行跳过空轮：T18 才有原文时写 T18 而不是 T18 之外的号', bGap.includes('T18'), bGap)
 
 console.log(failed === 0 ? `\ncompress 断言测试全部通过（${total} 项）` : `\ncompress 断言测试失败 ${failed} / ${total}`)
 if (failed !== 0) process.exitCode = 1

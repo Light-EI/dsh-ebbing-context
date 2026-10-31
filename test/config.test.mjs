@@ -43,14 +43,21 @@ reject('triggerPct 超出范围', { triggerPct: 1.5 }, 'triggerPct 不能大于'
 accept('空配置', {})
 accept('只写 budget.l1', { budget: { l1: 0.1 } })
 accept('只写 title.maxTokens', { title: { maxTokens: 60 } })
-// 不压时退回多少增长额度（用户 m14431 第 3 条）：0~100 的百分数，默认 100
-accept('notice.forgivePct = 0（一分不退）', { notice: { forgivePct: 0 } })
-accept('notice.forgivePct = 50（退一半）', { notice: { forgivePct: 50 } })
-reject('notice.forgivePct 超值', { notice: { forgivePct: 120 } }, 'notice.forgivePct 不能大于')
-if (DEFAULTS.notice.forgivePct !== 100) {
-  console.error('FAIL DEFAULTS.notice.forgivePct 应为 100（默认全额退回）')
+// 不压之后门槛重设到原额的百分之多少（用户 m15172）：0~100 的百分数，默认 40
+accept('notice.growthResetPct = 0（下一轮立刻再触发）', { notice: { growthResetPct: 0 } })
+accept('notice.growthResetPct = 50（原额的一半）', { notice: { growthResetPct: 50 } })
+reject('notice.growthResetPct 超值', { notice: { growthResetPct: 120 } }, 'notice.growthResetPct 不能大于')
+if (DEFAULTS.notice.growthResetPct !== 40) {
+  console.error('FAIL DEFAULTS.notice.growthResetPct 应为 40（默认按原额四成重设）')
   failed++
 }
+// 子代理默认参与（用户 m16497）：它们也会看到已压缩的表层，没有轮次标记就会误读块覆盖了哪几轮。
+if (DEFAULTS.notice.notifySubagents !== true) {
+  console.error('FAIL DEFAULTS.notice.notifySubagents 应为 true（子代理也要拿轮次标记）')
+  failed++
+}
+accept('notice.notifySubagents = false（想安静时关掉）', { notice: { notifySubagents: false } })
+reject('notice.notifySubagents 写成字符串', { notice: { notifySubagents: 'yes' } }, '应该是 true 或 false')
 // 语言项已整体删除：再写 lang 必须被当成未知子键拒绝
 reject('title.lang 已删除', { title: { lang: 'en' } }, 'title.lang 不认识')
 // 深合并的前提：默认值本身是完整的（缺了它，只写 lang 会把 maxTokens 一起吃掉）
@@ -59,6 +66,19 @@ if (DEFAULTS.title.maxTokens !== 50 || 'lang' in DEFAULTS.title) {
   failed++
 }
 
+
+// 老配置项迁移（审计 A-G2）：forgivePct 改名 growthResetPct 之后不许让老 profile 起不来。
+try {
+  const migrated = { notice: { forgivePct: 70 } }
+  validateConfig(migrated)
+  if (migrated.notice.growthResetPct !== 70 || "forgivePct" in migrated.notice) {
+    console.error("FAIL forgivePct 没有被迁移成 growthResetPct")
+    failed += 1
+  }
+} catch (error) {
+  console.error("FAIL 老配置 forgivePct 让插件拒绝启动：" + error.message)
+  failed += 1
+}
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)

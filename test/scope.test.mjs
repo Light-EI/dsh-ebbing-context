@@ -134,25 +134,38 @@ function declaredInApply(text) {
   return names
 }
 
-// 模块级函数（列首 function）：返回 [{name, params, body}]
+// 模块级函数：普通 function / export function / async function / const x = (…) => {…}
+// 2026-10-31 用户 m16024：原来只认行首 `function`，`export function`、`async`、
+// 箭头函数全都看不见——0.1.6 的 `reminded` 恰好写在普通 function 里才被逮到，
+// 换成 `const compressTool = async (…) => {…}` 这类写法就会静默漏掉。
 function moduleFunctions(text) {
   const list = []
-  const re = /^function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm
-  let m
-  while ((m = re.exec(text))) {
-    const open = text.indexOf('{', m.index + m[0].length - 1)
-    const [s, e] = blockOf(text, open)
-    if (s < 0) continue
-    const body = text.slice(s, e)
-    const params = new Set(
-      m[2].split(',').map((p) => p.trim().split(/[=:\s]/)[0]).filter(Boolean),
-    )
-    // 函数体里的局部声明也算自己人
-    const locals = new Set()
-    const lre = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g
-    let lm
-    while ((lm = lre.exec(body))) locals.add(lm[1])
-    list.push({ name: m[1], params, locals, body })
+  const patterns = [
+    /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm,
+    /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>\s*\{/gm,
+    /^(?:export\s+)?let\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>\s*\{/gm,
+  ]
+  const seen = new Set()
+  for (const re of patterns) {
+    re.lastIndex = 0
+    let m
+    while ((m = re.exec(text))) {
+      if (seen.has(m[1] + '@' + m.index)) continue
+      seen.add(m[1] + '@' + m.index)
+      const open = text.indexOf('{', m.index + m[0].length - 1)
+      const [s, e] = blockOf(text, open)
+      if (s < 0) continue
+      const body = text.slice(s, e)
+      const params = new Set(
+        m[2].split(',').map((p) => p.trim().split(/[=:\s]/)[0]).filter(Boolean),
+      )
+      // 函数体里的局部声明也算自己人
+      const locals = new Set()
+      const lre = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g
+      let lm
+      while ((lm = lre.exec(body))) locals.add(lm[1])
+      list.push({ name: m[1], params, locals, body })
+    }
   }
   return list
 }
@@ -167,12 +180,41 @@ const offenders = []
 for (const fn of fns) {
   for (const name of applyLocals) {
     if (fn.params.has(name) || fn.locals.has(name)) continue
-    const re = new RegExp(`\\b${name}\\b`)
+    // 属性访问（`session.log`）不算引用：只认裸标识符，前面不能是 `.` 或标识符字符。
+    const re = new RegExp(`(?<![.\\w$])${name}\\b`)
     if (re.test(fn.body)) offenders.push(`${fn.name} 引用了 apply() 的局部变量 ${name}`)
   }
 }
 
 check('模块级函数不引用 apply() 的局部变量', offenders.length === 0, offenders.join('；'))
+
+// 自检：把三种写法各造一个"坏函数"，确认解析器真的能逮到箭头函数里的同类错。
+// 不做这一步的话，"扩展了解析面"只是自我感觉良好——0.1.6 的教训就是测试没盖住那条路径。
+{
+  const sample = [
+    'export function apply() {',
+    '  const reminded = new Map()',
+    '  const foldQueues = new Map()',
+    '  return null',
+    '}',
+    'const arrowBad = (a) => {',
+    '  return reminded.get(a)',
+    '}',
+    'async function plainBad(b) {',
+    '  return foldQueues.get(b)',
+    '}',
+  ].join('\n')
+  const localsOfSample = declaredInApply(sample)
+  const fnsOfSample = moduleFunctions(sample)
+  const hits = []
+  for (const fn of fnsOfSample) {
+    for (const name of localsOfSample) {
+      if (fn.params.has(name) || fn.locals.has(name)) continue
+      if (new RegExp(`(?<![.\\w$])${name}\\b`).test(fn.body)) hits.push(`${fn.name}:${name}`)
+    }
+  }
+  check('自检：箭头函数与 async 函数里的同类错也能被逮到', hits.includes('arrowBad:reminded') && hits.includes('plainBad:foldQueues'), hits.join(','))
+}
 
 // 顺带钉住这次的具体 bug：resetGrowthBaseline 的第四个参数必须是本函数自己的入参。
 const compressFn = fns.find((f) => f.name === 'compressTool')
