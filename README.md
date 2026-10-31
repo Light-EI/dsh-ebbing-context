@@ -112,7 +112,7 @@ MIT。
 
 插件里检查点前导语（`This is an automatically generated checkpoint …`）与被压内容边界标签（`<compacted-summary>` / `</compacted-summary>`）的**文字**抄自 DSH 自带的 `@deepseek-ai/dsh-compaction-basic`（MIT）——宿主界面与日志靠这段文字识别检查点，必须逐字节一致。除此之外没有复制任何代码。
 
-当前实现的完整规范见 [docs/SPEC.md](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md)；设计推演与取舍见 [机制与实现路径](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/机制与实现路径.md)。
+实现说明见 [docs/SPEC.md](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md)：分层模型、四个键、级联与保护边界、配置项、依赖的宿主约定、已知限制。
 
 ---
 
