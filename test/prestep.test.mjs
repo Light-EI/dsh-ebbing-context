@@ -523,16 +523,25 @@ function layeredSession(layers, chars, used = 300) {
   return session
 }
 
-await check('区超限的判据：更浅、且有内容的层压不动时，这一层不报', async () => {
+await check('区超限的判据：更浅的层压不动时，这一层不报', async () => {
   const { zoneNoticeAllowed } = await import('../index.js')
   const over = { l1: true, l2: true, l3: true }
-  const has = { l0: true, l1: true, l2: true, l3: true }
-  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: false, l2: true, l3: true }, has), false, 'L1 有内容却压不动 → L2 不报')
-  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: true, l2: true, l3: true }, has), true, '全都能压 → 报')
-  // 浅层是空的：不算"不可压"，不许把深层一起拖黑（压缩完只剩块时就是这种形状）
-  assert.equal(zoneNoticeAllowed('l2', over, { l0: false, l1: false, l2: true, l3: true }, { l0: false, l1: false, l2: true, l3: true }), true, '空层不拦')
-  assert.equal(zoneNoticeAllowed('l3', over, { l0: true, l1: true, l2: false, l3: true }, has), false, 'L2 有内容压不动 → L3 不报')
-  assert.equal(zoneNoticeAllowed('l2', over, null, has), true, '拿不到可压状态时不拦')
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: false, l2: true, l3: true }, { l0: false }), false, 'L1 压不动 → L2 不报')
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: true, l2: true, l3: true }, { l0: false }), true, '全都能压 → 报')
+  assert.equal(zoneNoticeAllowed('l3', over, { l0: true, l1: true, l2: false, l3: true }, { l0: false }), false, 'L2 压不动 → L3 不报')
+  // 环境原因不算拖累：轮次大纲坏了、l0 判不出可压区间，但 l1/l2 根本不需要轮号（用户 m14892）。
+  assert.equal(zoneNoticeAllowed('l2', over, { l0: false, l1: true, l2: true, l3: true }, { l0: true }), true, 'l0 只是环境原因压不动 → L2 照报')
+  assert.equal(zoneNoticeAllowed('l2', over, null, null), true, '拿不到可压状态时不拦')
+})
+
+await check('区超限：轮次大纲坏了、l0 判不出来，但 L2 压得动 → 照报（不把它一起拖黑）', async () => {
+  const session = layeredSession(['L1', 'L1', 'L2', 'L2'], 300)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 1, 'l0 的不可压是环境原因，不该连坐 l2')
 })
 
 await check('区超限：L2 满了但 L1 只剩一块（压不动）→ 不叫醒', async () => {
@@ -545,15 +554,16 @@ await check('区超限：L2 满了但 L1 只剩一块（压不动）→ 不叫�
   assert.equal(step.agent.followups.length, 0, '浅层有内容却压不动时，深层的超限提醒没有意义')
 })
 
-await check('区超限：浅层是空的，深层照样报', async () => {
+await check('区超限：浅层为空时深层也不报（这种表层本身不该出现，出现了就别叫醒）', async () => {
+  // 块只能由下一层压出来，而每层最后一块永不压 → "L2 有块、L1 却是空的"根本不可能。
+  // 真出现了说明表层被外部改过，这时任何提醒都只会换来一次拒绝（用户 m14892）。
   const session = layeredSession(['L2', 'L2'], 300)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
-  assert.equal(step.agent.followups.length, 1)
-  assert.match(String(step.agent.followups[0].content[0].text), /L2 区已超设计容量/)
+  assert.equal(step.agent.followups.length, 0)
 })
 
 await check('增长触发没东西可压：门槛砍到一半、基线前移，压得动时按半个门槛再报', async () => {

@@ -400,17 +400,16 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
         l2: canCompressZone(zones, 'l2', keepTurns),
         l3: canCompressZone(zones, 'l3', keepTurns),
       }
-      // "这一层还有内容吗"：区分"空层"与"有内容但压不动"。空层不该被当成不可压的拖累。
-      st.zoneHas = {
-        l0: (zones.zones.l0 || []).length > 0,
-        l1: (zones.zones.l1 || []).length > 0,
-        l2: (zones.zones.l2 || []).length > 0,
-        l3: (zones.zones.l3 || []).length > 0,
+      // l0 压不动有两种原因：内容（只剩 keepTurns 保住的轮）与环境（轮次大纲损坏、
+      // 拿不到轮号）。只有"内容原因"才该拖住深层的提醒——环境坏掉时 l1/l2 照样能用，
+      // 拿它把整个金字塔拖黑，等于地图写着"l1/l2 照常"而提醒永远不发（用户 m14892）。
+      st.envBlocked = {
+        l0: zones.outlineFault !== null || zones.turnStarts === null,
       }
     } catch {
       st.ambiguous = false
       st.compressible = null
-      st.zoneHas = null
+      st.envBlocked = null
     }
   }
   if (st.ambiguous) {
@@ -419,7 +418,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
   }
   const zoneOver = st.zonesOver || {}
   const compressible = st.compressible || null
-  const zoneHas = st.zoneHas || null
+  const envBlocked = st.envBlocked || null
   const anyCompressible = compressible ? Object.values(compressible).some(Boolean) : true
 
   const reasons = []
@@ -442,7 +441,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
   // 区超限：要报的那一层，比它浅的层必须全都压得动（用户 m14431 第 1 条）。
   // 深一层满、浅层没满时照报浅层那条；地图上写着深层不可压，模型不会硬去压它。
   for (const key of ['l1', 'l2', 'l3']) {
-    const worthTelling = zoneNoticeAllowed(key, zoneOver, compressible, zoneHas)
+    const worthTelling = zoneNoticeAllowed(key, zoneOver, compressible, envBlocked)
     if (worthTelling && !st.zones[key]) reasons.push('zone-' + key)
     // 掉回线下就复位：否则某个区一旦报过一次，这个会话里就再也不报了
     // （只压某一层的工作流里，模型压小后再次越线会彻底静默）。
@@ -463,24 +462,29 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
   byAgent.set(id, { signal: payload.signal, record })
 }
 
-// 区超限要不要报：比它浅、**而且还有内容**的层必须全都压得动（用户 m14431 第 1 条）。
-// 道理：压深层要把上面还能压的层同批给出去；浅层有内容却压不动时，这条提醒只能换来一次拒绝。
-// 浅层是空的则不算"不可压"——空层本来就不用进这一批，不许拿它把深层一起拖黑。
-// 反过来（深一层满、浅层没满）照报浅层那条：地图上会写着深层不可压，模型不会硬去压它。
+// 区超限要不要报：比它浅的层必须全都压得动（用户 m14431 第 1 条）。
+// 道理：压深层要把上面还能压的层同批给出去；浅层压不动时，这条提醒只能换来一次拒绝。
+//
+// 但"压不动"要分两种（用户 m14892）：
+//   · 内容原因——只剩 keepTurns 保住的轮、或只剩每层最后一块：这是真的没得压，该拦。
+//   · 环境原因——轮次大纲损坏、拿不到轮号：l0 判不出可压区间，但 l1/l2 根本不需要轮号，
+//     这时还拦就是把地图上"l1/l2 照常能压"变成空话。所以环境原因不算拖累。
+// 空层不用单独判断：块只能由下一层压出来，每层最后一块又永不压，
+// 所以"上层有块而下层为空"不可能出现，深层的提醒自然也不会响。
 const SHALLOWER = { l1: ['l0'], l2: ['l0', 'l1'], l3: ['l0', 'l1', 'l2'] }
 
-export function zoneNoticeAllowed(key, zoneOver, compressible, hasContent) {
+export function zoneNoticeAllowed(key, zoneOver, compressible, envBlocked) {
   if (!zoneOver || !zoneOver[key]) return false
   // 拿不到哪一层压得动（读表层失败）：不拦，宁可多报一次也别静默。
   if (!compressible) return true
   if (!compressible[key]) return false
-  return SHALLOWER[key].every((k) => !(hasContent && hasContent[k]) || compressible[k])
+  return SHALLOWER[key].every((k) => compressible[k] || (envBlocked && envBlocked[k]))
 }
 
 function newState() {
   return {
     turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null,
-    autoTurn: null, ambiguous: false, compressible: null, zoneHas: null, lineOn: false,
+    autoTurn: null, ambiguous: false, compressible: null, envBlocked: null, lineOn: false,
     // 增长这条触发自己的两格状态（用户 m14431 第 2 条）：
     // growthQuota = 当前门槛（null 表示用配置里的原额；压不动时砍到一半）
     // growthLamp  = 增长指示灯（亮着表示"已经在等模型动手"，收尾那步才发得出去）
