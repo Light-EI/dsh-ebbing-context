@@ -1,7 +1,7 @@
 // 断言：把「compress 调用 + 返回」折成一句短注的三条硬边界。
 // 跑法：node --permission --allow-fs-read=* plugin/test/callfold.test.mjs
 import assert from 'node:assert/strict'
-import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, shrinkReceipt, FOLD_NOTE_HEAD } from '../lib/callfold.js'
+import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, shrinkReceipt, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
 
 let passed = 0
 const check = (name, fn) => {
@@ -110,7 +110,9 @@ check('开关关掉：一个字节都不动', () => {
 
 check('短注正文：带抬头、带每条结果、不提任何工具名', () => {
   const note = buildNote(['l3 成功：甲（3 条 -> 省 400 token）', 'l2 成功：乙（2 条 -> 省 300 token）'])
-  assert.equal(note.split('\n')[0], FOLD_NOTE_HEAD + '你刚刚做过一次分层压缩，已经成功：')
+  // 第 1 行现在带'插件写的消息'自报家门（审计 G6），第 2 行才是身份哨兵。
+  assert.equal(note.split('\n')[0], FOLD_NOTE_HEAD + '（插件写的消息，不是你自己的话，也不是用户说的）')
+  assert.equal(note.split('\n')[1], FOLD_NOTE_MARK)
   assert.equal(note.includes('- l3 成功：甲'), true)
   // 提工具名会诱导模型为了"看一眼"再调一次；而地图只给标题，那趟白花钱。
   assert.equal(note.includes('context_map'), false)
@@ -247,10 +249,16 @@ const resultEvent = (id, text, extra) => ({
   type: 'tool/result',
   data: { message: { role: 'tool', toolCallId: id, content: [{ type: 'text', text }], ...(extra || {}) } },
 })
+const textEvent = (text) => ({
+  type: 'assistant/message',
+  data: { message: { role: 'assistant', content: [{ type: 'text', text }] } },
+})
 
 check('失败回执：只折地图、错误原因逐字留着，且除 content 外字段不变', () => {
   const failed = '没能压缩：地图过期了\n\n' + MAP_TEXT
-  const session = preciseSession([10, 11], { 10: callEvent([['compress', 'c1']]), 11: resultEvent('c1', failed) })
+  // 末尾再跟一条助手消息：宿主在构造下一次请求之后才可能是这个形状，
+  // 也就是"模型已经读过那条回执"——只有这种才允许折（审计 S1）。
+  const session = preciseSession([10, 11, 12], { 10: callEvent([['compress', 'c1']]), 11: resultEvent('c1', failed), 12: textEvent('好，我再试一次') })
   const r = shrinkReceipt(session, null)
   assert.equal(r.done, true)
   assert.equal(r.kind, 'failed')
@@ -268,9 +276,10 @@ check('失败回执：只折地图、错误原因逐字留着，且除 content �
 })
 
 check('失败回执的 isError 等字段原样保留', () => {
-  const session = preciseSession([10, 11], {
+  const session = preciseSession([10, 11, 12], {
     10: callEvent([['compress', 'c1']]),
     11: resultEvent('c1', '没能压缩：x\n\n' + MAP_TEXT, { isError: true }),
+    12: textEvent('再试'),
   })
   const r = shrinkReceipt(session, null)
   assert.equal(r.done, true)
@@ -278,11 +287,12 @@ check('失败回执的 isError 等字段原样保留', () => {
 })
 
 check('并行调用：不整段替换，只收紧返回正文并销掉待折项', () => {
-  const nodes = [10, 11, 12]
+  const nodes = [10, 11, 12, 13]
   const session = preciseSession(nodes, {
     10: callEvent([['compress', 'c1'], ['context_map', 'c2']]),
     11: resultEvent('c2', '地图'), // 兄弟调用的返回
     12: resultEvent('c1', 'l0 成功：甲（12 条 -> 省 800 token）\n\n' + MAP_TEXT),
+    13: textEvent('接着压'),
   })
   const queue = new Map()
   rememberFold(queue, 'c1', ['x'], 10)
@@ -310,6 +320,19 @@ check('并行调用：不整段替换，只收紧返回正文并销掉待折项'
 check('不是我们的返回（没有地图）：一个字节都不动', () => {
   const session = preciseSession([10, 11], { 10: callEvent([['pwsh', 'c9']]), 11: resultEvent('c9', '普通输出') })
   assert.equal(shrinkReceipt(session, new Map()).done, false)
+  assert.equal(session.appends.length, 0)
+})
+
+check('末尾那条回执模型还没读过：不许折（审计 S1）', () => {
+  // 第 k 步发调用、返回落盘；第 k+1 步的 pre-step 跑在构造请求之前——
+  // 这时候折地图，模型一眼都没看到，只会照着"重新取一次地图"再绕一趟。
+  const session = preciseSession([10, 11], {
+    10: callEvent([['compress', 'c1']]),
+    11: resultEvent('c1', '没能压缩：地图过期了\n\n' + MAP_TEXT),
+  })
+  const r = shrinkReceipt(session, null)
+  assert.equal(r.done, false)
+  assert.equal(r.reason, 'not-read-yet')
   assert.equal(session.appends.length, 0)
 })
 
