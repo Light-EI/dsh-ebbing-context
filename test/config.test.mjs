@@ -1,6 +1,9 @@
 // 配置校验的断言测试（不是冒烟：失败会以非零退出码结束）。
 // 跑法：node plugin/test/config.test.mjs
+import { readFileSync } from 'node:fs'
 import { validateConfig, DEFAULTS } from '../lib/config.js'
+
+const KNOWN_TOP = ['budget', 'segment', 'title', 'notice', 'pruneFirst', 'foldCallRecord', 'requireSessionQuery', 'reservedTokens', 'triggerPct', 'keepTurns']
 
 let failed = 0
 const reject = (name, cfg, mustInclude) => {
@@ -15,6 +18,36 @@ const reject = (name, cfg, mustInclude) => {
     }
   }
 }
+
+// patch 模板本身就是一份真配置：缩进错一层会让插件"启动即拒绝"（0.1.11 就是这样翻车的）。
+// 测试只验内存对象是抓不到这个的，所以直接解析模板、按缩进还原层级再验一遍。
+{
+  const yml = readFileSync(new URL('../dsh.bundle.patch.yml', import.meta.url), 'utf8').split(/\r?\n/)
+  const top = new Set()
+  const sub = new Map()
+  let cur = null
+  for (const line of yml) {
+    if (/^\s*#/.test(line) || !line.trim()) continue
+    const m = /^( *)([A-Za-z][\w]*):\s*(.*)$/.exec(line)
+    if (!m) continue
+    const depth = m[1].length
+    if (depth === 8) { top.add(m[2]); cur = m[2] }
+    else if (depth === 10 && cur) {
+      if (!sub.has(cur)) sub.set(cur, [])
+      sub.get(cur).push(m[2])
+    }
+  }
+  const bad = [...top].filter((k) => !KNOWN_TOP.includes(k))
+  if (bad.length) { console.error('FAIL patch 模板里有未知的顶层键: ' + bad.join(',')); failed++ }
+  const noticeSubs = sub.get('notice') || []
+  for (const k of noticeSubs) {
+    if (!['enabled', 'growthTokens', 'growthResetPct', 'notifySubagents'].includes(k)) {
+      console.error('FAIL patch 模板 notice 组里有未知子键: ' + k); failed++
+    }
+  }
+  if (!top.has('notice')) { console.error('FAIL patch 模板缺 notice 组'); failed++ }
+}
+
 const accept = (name, cfg) => {
   try {
     validateConfig(cfg)
@@ -58,6 +91,15 @@ if (DEFAULTS.notice.notifySubagents !== true) {
 }
 accept('notice.notifySubagents = false（想安静时关掉）', { notice: { notifySubagents: false } })
 reject('notice.notifySubagents 写成字符串', { notice: { notifySubagents: 'yes' } }, '应该是 true 或 false')
+// 0.1.11 的模板把 notifySubagents 写到了根上：装过那版的人不能因此启动即失败
+{
+  const migrated = { notifySubagents: true }
+  validateConfig(migrated)
+  if (!migrated.notice || migrated.notice.notifySubagents !== true || "notifySubagents" in migrated) {
+    console.error("FAIL 根级 notifySubagents 应被迁到 notice.notifySubagents")
+    failed++
+  }
+}
 // 语言项已整体删除：再写 lang 必须被当成未知子键拒绝
 reject('title.lang 已删除', { title: { lang: 'en' } }, 'title.lang 不认识')
 // 深合并的前提：默认值本身是完整的（缺了它，只写 lang 会把 maxTokens 一起吃掉）
