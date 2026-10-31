@@ -78,9 +78,9 @@ dsh plugin add ./dsh-ebbing-context
 - 轮次大纲损坏（日志缺 `turn/start` 或乱序）时，该轮报红色错误并停用。
 - 区占用由插件自估（中文 1 字 ≈ 1 token），与宿主计价器略有差异，会略早提醒。
 
-## 许可与出处
+## 许可
 
-MIT。分层压缩的思路受 [billion-context](https://github.com/ranxianglei/billion-context) 启发，实现与协议完全重写，只使用宿主公开的会话事件。
+MIT。
 
 ## 参与
 
