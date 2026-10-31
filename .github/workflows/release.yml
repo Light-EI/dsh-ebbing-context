@@ -41,10 +41,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: release notes（只取 CHANGELOG 最上面那一节）
+        id: notes
+        run: node scripts/release-notes.mjs "${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: upload release asset
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tgz
-          generate_release_notes: true
-          body_path: CHANGELOG.md
+          name: ${{ steps.notes.outputs.title }}
+          body_path: dist/notes.md
           fail_on_unmatched_files: true
