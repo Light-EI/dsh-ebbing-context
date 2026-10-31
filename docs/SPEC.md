@@ -598,6 +598,7 @@ reservedTokens: 0                                  // 读不到这条路由的 m
 | `v0.1.0`（发布） | 2026-10-30 推送 GitHub：仓库 `Light-EI/dsh-ebbing-context`（由 `dsh-infinity-context` 改名而来），默认分支 `main`，标签 `v0.1.0`，Release 标题注明"未在真机验证"。发布副本在 `ref\_pub\dsh-ebbing-context`，内容 = `plugin/` 全量 + `docs/SPEC.md` + `docs/机制与实现路径.md` + `CHANGELOG.md` + `LICENSE`。仓库当前是 **private**，`package.json` 仍是 `"private": true`（防止误发 npm）；要公开或发 npm 需单独改 |
 | `v0.1.6`（修复） | 真机反馈坐实的成功路径崩溃：`compressTool` 是模块级函数，却在成功分支里引用 `apply()` 的局部名 `reminded` → 每次压缩成功都抛 `ReferenceError`，被 `execute` 外层 `catch` 吞成「压缩时出错了」。四事件其实已落盘，`rememberFold` 被跳过（回执与地图留在表层）。修法：`compressTool(ctx, config, log, foldQueues, reminded)` 改为传入。新增 `plugin/test/scope.test.mjs`（静态扫描：`apply()` 顶层声明名 × 模块级函数体，4 项），并把 `l1`/`l2` 参数说明里的「前 N 块」改成「最老的一块或几块，到 to 指定的那块为止」 |
 | `v0.1.7`（提醒口径） | 用户 m14280 三条：① 区超限只在那一层 `canCompressZone` 为真时才进理由表；② 纯增长触发时若一层都压不动则整条不发（到线那条照发）；③ 提醒正文加入「没做完/还要用就别压，这一轮允许什么都不压」与「压完只回一两句」。实现落在 `remindIfNeeded()`（新增 `st.compressible`）与 `noticeText()`；`prestep` 测试 16 → 20 项 |
+| `v0.1.8`（提醒语义重做） | 用户 m14431 四条 + m14563：① 区超限要连「比它浅、且还有内容」的层一起判（`zoneNoticeAllowed()`，空层不算拦）；② 增长触发压不动时门槛砍半、基线前移，直到真的能压（`st.growthQuota` / `st.growthLamp`）；③ 模型选择本轮不压则按新配置 `notice.forgivePct`（默认 100）退额度（`settleGrowth()` 挂 `agent/turn-stopping`）；④ 任何原因触发的压缩都清空增长状态（`resetGrowthBaseline()`）；⑤ 到线与区超限改成越线触发（`st.lineOn` 锁存），停在线上不重复催。配置叶子 15 → 16；`prestep` 20 → 27、`config` 11 → 14 |
 
 ### 20.2 三条被澄清的设计前提（写代码前先对照）
 
