@@ -520,6 +520,10 @@ function settleGrowth(ctx, config, state, payload, log) {
   if (usage) st.tokens = st.tokens + (usage.used - st.tokens) * (pct / 100)
   st.growthPending = null
   st.growthLamp = false
+  // 退完这次增长就把门槛放回原额：砍半只是"压不动时早点给一次机会"的临时手段，
+  // 不能让某一次压不动的历史把此后每一轮都变成半个门槛（用户 m14797）。
+  // 成功压缩那条路更彻底：resetGrowthBaseline 会把 quota/lamp/pending 一起清空。
+  st.growthQuota = null
   log('growth-forgiven', { agent: id, turn, forgivePct: pct })
 }
 
