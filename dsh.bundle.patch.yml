@@ -18,7 +18,8 @@
         notice:
           enabled: true
           growthTokens: 65000
-          forgivePct: 100
+          growthResetPct: 40
+        notifySubagents: true
         title:
           maxTokens: 50
         requireSessionQuery: true
