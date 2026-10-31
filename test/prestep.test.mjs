@@ -418,4 +418,78 @@ await check('turn-stopping 按 serial 派发只传一个参数：不抛异常，
   await handler({ agent: { id: 'a1' }, turn: 3, signal: { aborted: false } })
 })
 
+// —— 提醒别在"根本压不动"的时候把人叫醒（用户 m14280 第 1、2 条）——
+//
+// 一条提醒的实际代价是：叫醒模型开一整轮（请求 + 可能的失败调用 + 提醒正文永久进历史）。
+// 所以只有当"这层真的压得动"时才值得开口；区只剩最后一块、或纯增长触发但一层都压不了时，
+// 叫醒了也只能撞一次拒绝——这正是把用户逼去 /compact 的那条路。
+
+function blockSession(count, chars) {
+  const messages = []
+  const nodes = []
+  for (let i = 0; i < count; i += 1) {
+    const head = `〔L1｜T${i * 2 + 1}–T${i * 2 + 2}｜ev ${10 + i}–${20 + i}〕第 ${i + 1} 块`
+    messages.push({
+      role: 'user',
+      source: { kind: 'compact-checkpoint' },
+      content: [{ type: 'text', text: head + '\n' + '摘'.repeat(Math.max(1, Math.ceil(chars))) }],
+    })
+    nodes.push(100 + i)
+  }
+  const session = fakeSession(nodes, messages)
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 1000 })
+  session.used = 300
+  return session
+}
+
+await check('区超限但那一层只剩最后一块（压不动）：不发提醒', async () => {
+  const session = blockSession(1, 300) // 300 token > 0.1 × 1000 的区上限，但只有 1 块 → 压不动
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 0, '压不动的层不该叫醒模型')
+})
+
+await check('区超限且那一层压得动（≥2 块）：照常提醒', async () => {
+  const session = blockSession(2, 300)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 1)
+  assert.match(String(step.agent.followups[0].content[0].text), /L1 区已超设计容量/)
+})
+
+await check('纯增长触发但一层都压不了：不发提醒', async () => {
+  const session = usageSession(500)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
+  const first = STEP(1)
+  await ctx.handlers.get('agent/pre-step')(first, () => {})
+  // 第一步只把基线定下来；第二步用量涨过 growthTokens，但表层没有任何可压的东西。
+  session.used = 700
+  session.seq += 1
+  const second = STEP(2, 1, { agent: first.agent })
+  await ctx.handlers.get('agent/pre-step')(second, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: second.signal }, () => {})
+  assert.equal(second.agent.followups.length, 0, '没有可压的东西时，增长触发不该叫醒模型')
+})
+
+await check('提醒里明确写了「允许不压」与「压完简短回复」', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  const text = String(step.agent.followups[0].content[0].text)
+  assert.match(text, /这一轮允许什么都不压/, '必须明确允许本轮不采取压缩行动')
+  assert.match(text, /压完只回一两句/, '必须要求压完之后简短回复')
+  assert.match(text, /还没做完/, '必须点名"没做完的事"作为不压的理由')
+})
+
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

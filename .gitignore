@@ -5,3 +5,4 @@ ref/
 .bak
 
 push.ps1
+.npm-cache/
