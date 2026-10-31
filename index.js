@@ -10,7 +10,7 @@ import { DEFAULTS, NAME, validateConfig } from './lib/config.js'
 import { renderMap } from './lib/map.js'
 import { estimateTokens } from './lib/tokens.js'
 import { issue, forget, restate } from './lib/license.js'
-import { readZones } from './lib/blocks.js'
+import { canCompressZone, readZones } from './lib/blocks.js'
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
 import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, shrinkReceipt } from './lib/callfold.js'
@@ -377,10 +377,21 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
     st.zonesOver = readZoneOver(ctx, session, config, usage.budget)
     // 整批必拒的状态（认不出块在哪）不要叫醒模型：叫醒了也压不动，
     // 每轮白烧一次请求和一次失败调用的 token，直到窗口撑爆把人逼去 /compact。
+    // 顺带把"哪一层现在真的压得动"算出来：区超限与纯增长这两类提醒只在
+    // 真能动手时才发（用户 m14280）——叫醒了却压不动，等于每轮白烧一次失败调用。
     try {
-      st.ambiguous = readZones(ctx, session).ambiguous === true
+      const zones = readZones(ctx, session)
+      st.ambiguous = zones.ambiguous === true
+      const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
+      st.compressible = {
+        l0: canCompressZone(zones, 'l0', keepTurns),
+        l1: canCompressZone(zones, 'l1', keepTurns),
+        l2: canCompressZone(zones, 'l2', keepTurns),
+        l3: canCompressZone(zones, 'l3', keepTurns),
+      }
     } catch {
       st.ambiguous = false
+      st.compressible = null
     }
   }
   if (st.ambiguous) {
@@ -388,12 +399,19 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
     return
   }
   const zoneOver = st.zonesOver || {}
+  const compressible = st.compressible || null
+  const anyCompressible = compressible ? Object.values(compressible).some(Boolean) : true
 
   const reasons = []
   if (onLine) reasons.push('line')
-  if (onGrowth) reasons.push('growth')
+  // 纯增长触发：一个可压的层都没有时闭嘴（用户 m14280 第 2 条）。
+  // 到线那条不在此列——它同时承担"告诉用户这一版压完了"的职责，不能说没就没。
+  if (onGrowth && anyCompressible) reasons.push('growth')
   for (const key of ['l1', 'l2', 'l3']) {
-    if (zoneOver[key] && !st.zones[key]) reasons.push('zone-' + key)
+    // 区超限只报"这一层真的压得动"的（用户 m14280 第 1 条）：
+    // 某层只剩最后一块、或大纲坏了导致判不了，报出来也只是让模型撞一次拒绝。
+    const worthTelling = !!zoneOver[key] && (!compressible || compressible[key])
+    if (worthTelling && !st.zones[key]) reasons.push('zone-' + key)
     // 掉回线下就复位：否则某个区一旦报过一次，这个会话里就再也不报了
     // （只压某一层的工作流里，模型压小后再次越线会彻底静默）。
     else if (!zoneOver[key]) st.zones[key] = false
@@ -414,7 +432,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload) {
 }
 
 function newState() {
-  return { turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null, autoTurn: null, ambiguous: false }
+  return { turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null, autoTurn: null, ambiguous: false, compressible: null }
 }
 
 function forgetPending(bySignal, byAgent, id, signal) {
@@ -578,10 +596,16 @@ function noticeText(ctx, config, record, count) {
     // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
     // 说清是谁发的、这不是用户发言，模型才不会把提醒里的数字当成用户给的要求。
     '〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕\n' +
+    // 第 3 点（用户 m14280）：提醒是"要不要压"的入口，不是"必须压"的命令。
+    // 把判断权明确交回模型：内容还在用就先留着，这一轮什么都不做也允许——
+    // 否则它会把做到一半的工作压掉，然后只剩自己写的那几行摘要。
+    '压不压由你判断：要压掉的那几轮里如果有还没做完的事（目标还没收尾、todo 没打完、还在验证、等用户拍板），' +
+    '或者内容接下来明显还要用到，就留着别动——这一轮允许什么都不压，按原计划继续干活即可。' +
     parts.join('') +
-    '现在可以压：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
+    '决定要压时：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
     '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。' +
-    '不要沉默，也不要假称压过了。' +
+    '不压也回一句为什么（例如"还没做完，先留着"），不要沉默，也不要假称压过了。' +
+    '压完只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。' +
     mapText
   )
 }
