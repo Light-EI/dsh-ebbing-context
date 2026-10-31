@@ -19,7 +19,7 @@
           enabled: true
           growthTokens: 65000
           growthResetPct: 40
-        notifySubagents: true
+          notifySubagents: true
         title:
           maxTokens: 50
         requireSessionQuery: true
