@@ -147,7 +147,7 @@ await check('pre-step 空跑：不抛异常，且一定调用 next()', async () 
   assert.equal(nexted, true)
 })
 
-// —— 提醒的投递时机（用户 m10065：固定在本轮收尾、用户下一句话之前）——
+// —— 提醒的投递时机（用户要求：固定在本轮收尾、用户下一句话之前）——
 
 function usageSession(used) {
   const session = fakeSession([10], [{ role: 'user', content: [{ type: 'text', text: '你好' }] }])
@@ -310,7 +310,7 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
   assert.equal(s3.agent.followups.length, 1, '越线时报一条')
-  // 一直停在线上面：用户开口了、又过了一轮，也不该再报（用户 m14563）
+  // 一直停在线上面：用户开口了、又过了一轮，也不该再报（设计约束）
   const s4 = STEP(4, 1, { agent: s3.agent, messages: [{ role: 'user', content: [], source: { kind: 'user' } }] })
   await ctx.handlers.get('agent/pre-step')(s4, () => {})
   s3.agent.inbox.nextTurn = []
@@ -335,7 +335,7 @@ await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
   const agent = wakeAgent()
   // 模拟"上一轮以异常收场、提醒没人认领"：inbox 里留着一条我们的提醒
-  // 必须带哨兵才算'我们写的'（审计 S2）：宿主自己的 cordis-host-runner 消息也可能排在这里。
+  // 必须带哨兵才算'我们写的'（回归修复）：宿主自己的 cordis-host-runner 消息也可能排在这里。
   const stale = { id: 'stale-1', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: '〔Ebbing Context 插件注入〕旧提醒' }], source: { kind: 'cordis-host-runner' } }
   agent.inbox.nextTurn.push(stale)
   const s3 = STEP(3, 1, { agent })
@@ -430,7 +430,7 @@ await check('foldPending 出错也不抛：记一条失败日志、留住这一�
   assert.equal(queue.failures, 2)
 })
 
-// 设计裁定（用户 m13359 选 A）：剪枝只在 compress 里做，与宿主同构——
+// 设计裁定（用户要求 选 A）：剪枝只在 compress 里做，与宿主同构——
 // 宿主把 toolResultPruner 当「压缩的前置步骤」（pressure 越线 / context-overflow 才叫），
 // 不压缩就不该动表层。常开会在任意步削掉模型正要引用的内容，而剪掉的内容不一定取得回
 // （没装会话搜索时工具是停用的，剪枝却不受那道闸门约束）。这条钉住"又有人把它挂回每步"。
@@ -480,7 +480,7 @@ await check('turn-stopping 按 serial 派发只传一个参数：不抛异常，
   await handler({ agent: { id: 'a1' }, turn: 3, signal: { aborted: false } })
 })
 
-// —— 提醒别在"根本压不动"的时候把人叫醒（用户 m14280 第 1、2 条）——
+// —— 提醒别在"根本压不动"的时候把人叫醒（用户要求 第 1、2 条）——
 //
 // 一条提醒的实际代价是：叫醒模型开一整轮（请求 + 可能的失败调用 + 提醒正文永久进历史）。
 // 所以只有当"这层真的压得动"时才值得开口；区只剩最后一块、或纯增长触发但一层都压不了时，
@@ -588,7 +588,7 @@ await check('区超限的判据：更浅的层压不动时，这一层不报', a
   assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: false, l2: true, l3: true }, { l0: false }), false, 'L1 压不动 → L2 不报')
   assert.equal(zoneNoticeAllowed('l2', over, { l0: true, l1: true, l2: true, l3: true }, { l0: false }), true, '全都能压 → 报')
   assert.equal(zoneNoticeAllowed('l3', over, { l0: true, l1: true, l2: false, l3: true }, { l0: false }), false, 'L2 压不动 → L3 不报')
-  // 环境原因不算拖累：轮次大纲坏了、l0 判不出可压区间，但 l1/l2 根本不需要轮号（用户 m14892）。
+  // 环境原因不算拖累：轮次大纲坏了、l0 判不出可压区间，但 l1/l2 根本不需要轮号（设计约束）。
   assert.equal(zoneNoticeAllowed('l2', over, { l0: false, l1: true, l2: true, l3: true }, { l0: true }), true, 'l0 只是环境原因压不动 → L2 照报')
   assert.equal(zoneNoticeAllowed('l2', over, null, null), true, '拿不到可压状态时不拦')
 })
@@ -615,7 +615,7 @@ await check('区超限：L2 满了但 L1 只剩一块（压不动）→ 不叫�
 
 await check('区超限：浅层为空时深层也不报（这种表层本身不该出现，出现了就别叫醒）', async () => {
   // 块只能由下一层压出来，而每层最后一块永不压 → "L2 有块、L1 却是空的"根本不可能。
-  // 真出现了说明表层被外部改过，这时任何提醒都只会换来一次拒绝（用户 m14892）。
+  // 真出现了说明表层被外部改过，这时任何提醒都只会换来一次拒绝（设计约束）。
   const session = layeredSession(['L2', 'L2'], 300)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
@@ -791,7 +791,7 @@ await check('区超限与增长同一轮都成立：合并成一条提醒，不�
 
 await check('轮次大纲损坏：pre-step 直接打红（抛错给宿主，不吞、不发请求）', async () => {
   // 日志里有 turn/start，但轮号缺了 3 —— 这是"自相矛盾"，不是"看不到"，
-  // 用户 m15081：这种情况要变成屏幕上的红色错误，本对话不可使用。
+  // 用户要求：这种情况要变成屏幕上的红色错误，本对话不可使用。
   const messages = [
     { role: 'user', content: [{ type: 'text', text: 'a' }] },
     { role: 'user', content: [{ type: 'text', text: 'b' }] },
@@ -821,7 +821,7 @@ await check('轮次大纲损坏：pre-step 直接打红（抛错给宿主，不�
 })
 
 
-// —— 2026-10-31 审计后的回归（F1 / S2 / S3 / G3 / 标记重载去重）──────────────
+// —— 回归用例（判定修复 / 快照失效 / 锁存 / 复位 / 标记去重）──────────────
 
 // 带真实 log 的会话：readZones 在没有 turnOutline 投影时会去 log 里找 turn/start，
 // 这正是"宿主每轮第 1 步还没把用户消息写进表层"的那个时序。
@@ -938,7 +938,7 @@ await check('标记重载去重：上一轮收尾写好的「下一轮 T3」还�
 })
 
 
-// —— 2026-10-31 用户 m16024：配置硬错误 + 每步只扫一次表层 ────────────────────
+// —— 用户要求：配置硬错误 + 每步只扫一次表层 ────────────────────
 
 await check('keepTurns 配成 0：pre-step 直接打红（不许悄悄按 2 跑，也不许压掉正在进行的轮）', async () => {
   const session = usageSession(900)

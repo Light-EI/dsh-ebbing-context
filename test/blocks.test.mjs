@@ -130,7 +130,7 @@ check('原文区只剩被保住的轮：不算可压', canCompressZone(onlyKeptR
 check('原文区有可压轮：算可压', canCompressZone(onlyKeptRaw, 'l0', 1) === true)
 
 // 第四组：轮次大纲自检（缺轮/乱序/当前轮没有节点）与"空节点 + 已有块"的歧义。
-// 这四条对应审计 A1 / A2 / A3：都是在"不报错的情况下压错轮"的路子上。
+// 这四条对应回归修复 / A2 / A3：都是在"不报错的情况下压错轮"的路子上。
 const gapCtx = {
   get: (name) => (name === 'sessionProjections'
     ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }, { turn: 4, seq: 55 }] }) }
@@ -151,7 +151,7 @@ const farCtx = {
     ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }, { turn: 3, seq: 500 }] }) }
     : null),
 }
-// 2026-10-31 审计 F1：'current' 不是故障（宿主每轮第 1 步都这样），只记成 currentEmpty。
+// 回归修复：'current' 不是故障（宿主每轮第 1 步都这样），只记成 currentEmpty。
 const far = readZones(farCtx, session)
 check('当前轮还没有节点时不算大纲故障（那是宿主的正常时序）', far.outlineFault === null, String(far.outlineFault))
 check('当前轮还没有节点时 currentEmpty 为真（地图据此说这一轮还没内容）', far.currentEmpty === true)

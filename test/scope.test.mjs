@@ -1,6 +1,6 @@
-// 作用域审计：模块级函数不许引用 apply() 里的局部变量。
+// 作用域检查：模块级函数不许引用 apply() 里的局部变量。
 //
-// 为什么专门钉这一条（2026-10-31 真机报错）：
+// 为什么专门钉这一条（真机报错）：
 //   compress 成功路径上写了 `resetGrowthBaseline(ctx, agent, config, reminded)`，
 //   而 `reminded` 是 apply() 里声明的局部 Map，被调的 compressTool 却是模块级函数。
 //   于是**每次成功压缩**都会抛 ReferenceError，被外层 catch 吞成「压缩时出错了」，
@@ -135,7 +135,7 @@ function declaredInApply(text) {
 }
 
 // 模块级函数：普通 function / export function / async function / const x = (…) => {…}
-// 2026-10-31 用户 m16024：原来只认行首 `function`，`export function`、`async`、
+// 用户要求：原来只认行首 `function`，`export function`、`async`、
 // 箭头函数全都看不见——0.1.6 的 `reminded` 恰好写在普通 function 里才被逮到，
 // 换成 `const compressTool = async (…) => {…}` 这类写法就会静默漏掉。
 function moduleFunctions(text) {
@@ -224,4 +224,4 @@ if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
 }
-console.log(`scope 作用域审计全部通过（${total} 项）`)
+console.log(`scope 作用域检查全部通过（${total} 项）`)

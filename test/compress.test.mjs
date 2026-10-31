@@ -75,7 +75,7 @@ const noMapper = imageLedger({}, [21])
 check('拿不到逐节点消息时不算图片（不报错、不写行）', noMapper.line === '', JSON.stringify(noMapper))
 
 // 上一层只列前 6 个事件号，但"张数"必须是真数：合并时按它写的总数接手，
-// 而不是按它列出来的几个号重算（审计 H1：100 张会被缩成 6 张）。
+// 而不是按它列出来的几个号重算（回归修复：100 张会被缩成 6 张）。
 const bigLedger = '〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要看图时用会话搜索按事件号查看。〕'
 const inherited = imageLedger({ messageFor: (seq) => (seq === 50 ? { content: [{ type: 'text', text: bigLedger }] } : null) }, [50])
 check('合并旧块时台账张数取上一层总数（不按列出的号数重算）', inherited.count === 100, String(inherited.count))

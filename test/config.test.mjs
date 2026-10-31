@@ -76,7 +76,7 @@ reject('triggerPct 超出范围', { triggerPct: 1.5 }, 'triggerPct 不能大于'
 accept('空配置', {})
 accept('只写 budget.l1', { budget: { l1: 0.1 } })
 accept('只写 title.maxTokens', { title: { maxTokens: 60 } })
-// 不压之后门槛重设到原额的百分之多少（用户 m15172）：0~100 的百分数，默认 40
+// 不压之后门槛重设到原额的百分之多少（设计约束）：0~100 的百分数，默认 40
 accept('notice.growthResetPct = 0（下一轮立刻再触发）', { notice: { growthResetPct: 0 } })
 accept('notice.growthResetPct = 50（原额的一半）', { notice: { growthResetPct: 50 } })
 reject('notice.growthResetPct 超值', { notice: { growthResetPct: 120 } }, 'notice.growthResetPct 不能大于')
@@ -84,7 +84,7 @@ if (DEFAULTS.notice.growthResetPct !== 40) {
   console.error('FAIL DEFAULTS.notice.growthResetPct 应为 40（默认按原额四成重设）')
   failed++
 }
-// 子代理默认参与（用户 m16497）：它们也会看到已压缩的表层，没有轮次标记就会误读块覆盖了哪几轮。
+// 子代理默认参与（设计约束）：它们也会看到已压缩的表层，没有轮次标记就会误读块覆盖了哪几轮。
 if (DEFAULTS.notice.notifySubagents !== true) {
   console.error('FAIL DEFAULTS.notice.notifySubagents 应为 true（子代理也要拿轮次标记）')
   failed++
@@ -109,7 +109,7 @@ if (DEFAULTS.title.maxTokens !== 50 || 'lang' in DEFAULTS.title) {
 }
 
 
-// 老配置项迁移（审计 A-G2）：forgivePct 改名 growthResetPct 之后不许让老 profile 起不来。
+// 老配置项迁移（回归修复）：forgivePct 改名 growthResetPct 之后不许让老 profile 起不来。
 try {
   const migrated = { notice: { forgivePct: 70 } }
   validateConfig(migrated)
