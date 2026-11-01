@@ -430,6 +430,80 @@ await check('foldPending 出错也不抛：记一条失败日志、留住这一�
   assert.equal(queue.failures, 2)
 })
 
+// 精确路径的假会话：log 按事件号放，deriveEventMessage 负责还原消息。
+// 只有这种形态才走 locateCall（能认出"同一条消息里几个调用""这一对后面还有没有节点"）。
+function foldSession(nodes, events) {
+  const log = []
+  for (const [k, v] of Object.entries(events)) log[Number(k)] = v
+  const appends = []
+  return {
+    appends,
+    log,
+    get surface() {
+      return { nodes: nodes.slice() }
+    },
+    deriveMessages() {
+      return []
+    },
+    deriveEventMessage(ev) {
+      return ev && ev.data ? ev.data.message : null
+    },
+    append(type, data, opts) {
+      appends.push({ type, data, opts })
+    },
+  }
+}
+
+await check('foldPending：这一对已经进过请求（后面还有节点）→ 不折、丢掉陈旧项、记「跳过」不是「失败」', async () => {
+  const session = foldSession([10, 11, 12], {
+    10: { type: 'assistant/message', data: { message: callMessage([['compress', 'c1']]) } },
+    11: { type: 'tool/result', data: { message: resultMessage('c1') } },
+    12: { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '好' }] } } },
+  })
+  const ctx = { sessions: { get: () => session } }
+  const queues = new Map([['a1', new Map([['c1', { lines: ['x'] }]])]])
+  const queue = queues.get('a1')
+  const logs = []
+  foldPending(ctx, { ...DEFAULTS, foldCallRecord: true }, queues, { agent: { id: 'a1' } }, (e) => logs.push(e))
+  assert.equal(session.appends.length, 0)
+  assert.equal(queue.size, 0)
+  assert.ok(!queue.lastError)
+  assert.match(queue.lastSkip.error, /前缀缓存/)
+  assert.deepEqual(logs, ['fold-call-record-skipped'])
+})
+
+await check('foldPending：开关关掉时不清陈旧的待折项会留成定时炸弹 → 直接清空、不写表层', async () => {
+  const session = foldSession([10, 11], {
+    10: { type: 'assistant/message', data: { message: callMessage([['compress', 'c1']]) } },
+    11: { type: 'tool/result', data: { message: resultMessage('c1') } },
+  })
+  const ctx = { sessions: { get: () => session } }
+  const queues = new Map([['a1', new Map([['c1', { lines: ['x'] }]])]])
+  foldPending(ctx, { ...DEFAULTS, foldCallRecord: false }, queues, { agent: { id: 'a1' } }, () => {})
+  assert.equal(session.appends.length, 0)
+  assert.equal(queues.get('a1').size, 0)
+})
+
+await check('foldPending：并行调用 → 记跳过（不是失败），表层不动', async () => {
+  const session = foldSession([10, 11], {
+    10: {
+      type: 'assistant/message',
+      data: { message: callMessage([['compress', 'c1'], ['context_map', 'c2']]) },
+    },
+    11: { type: 'tool/result', data: { message: resultMessage('c1') } },
+  })
+  const ctx = { sessions: { get: () => session } }
+  const queues = new Map([['a1', new Map([['c1', { lines: ['x'] }]])]])
+  const queue = queues.get('a1')
+  const logs = []
+  foldPending(ctx, { ...DEFAULTS, foldCallRecord: true }, queues, { agent: { id: 'a1' } }, (e) => logs.push(e))
+  assert.equal(session.appends.length, 0)
+  assert.equal(queue.size, 0)
+  assert.ok(!queue.lastError)
+  assert.match(queue.lastSkip.error, /挤在同一条消息/)
+  assert.deepEqual(logs, ['fold-call-record-skipped'])
+})
+
 // 设计裁定（用户要求 选 A）：剪枝只在 compress 里做，与宿主同构——
 // 宿主把 toolResultPruner 当「压缩的前置步骤」（pressure 越线 / context-overflow 才叫），
 // 不压缩就不该动表层。常开会在任意步削掉模型正要引用的内容，而剪掉的内容不一定取得回

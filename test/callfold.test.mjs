@@ -1,7 +1,7 @@
 // 断言：把「compress 调用 + 返回」折成一句短注的三条硬边界。
 // 跑法：node --permission --allow-fs-read=* plugin/test/callfold.test.mjs
 import assert from 'node:assert/strict'
-import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, shrinkReceipt, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
+import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
 
 let passed = 0
 const check = (name, fn) => {
@@ -42,6 +42,7 @@ const callMessage = (ids) => ({
   content: ids.map(([name, id]) => ({ type: 'tool-call', name, id, arguments: '{"x":1}' })),
 })
 const resultMessage = (id) => ({ role: 'tool', toolCallId: id, content: [{ type: 'text', text: '成功' }] })
+const textMessage = (text) => ({ role: 'assistant', content: [{ type: 'text', text }] })
 
 check('成对时：折成一条用户消息，来源列表覆盖两个节点', () => {
   const session = fakeSession([10, 11], [callMessage([['compress', 'c1']]), resultMessage('c1')])
@@ -58,8 +59,10 @@ check('成对时：折成一条用户消息，来源列表覆盖两个节点', (
   assert.equal(queue.size, 0)
 })
 
-check('同一轮里前后又调了别的工具（各自独立的消息）：照折', () => {
+check('同一轮里前后又调了别的工具（各自独立的消息）：不折（那一对已经进过请求）', () => {
   // 真实形态：一步一次调用——先 compress，再 pwsh、再 edit，每条助手消息只有一个调用。
+  // 编辑/命令的调用已经落盘，说明含 compress 回执的那次请求早发出去了：
+  // 这时再 replace 掉 [10,11]，从它往后的前缀缓存全部作废，省下的 token 远不够赔。
   const session = fakeSession(
     [10, 11, 12, 13, 14, 15],
     [
@@ -73,10 +76,10 @@ check('同一轮里前后又调了别的工具（各自独立的消息）：照�
   )
   const queue = new Map()
   rememberFold(queue, 'c1', ['l0 成功：甲（3 条 -> 省 400 token）'])
-  const note = foldCallRecord(session, queue, { foldCallRecord: true })
-  assert.equal(typeof note, 'string')
-  assert.deepEqual(session.appends[0].opts.surfaceOp, { op: 'replace', startSeq: 10, endSeq: 11 })
-  assert.equal(queue.size, 0)
+  assert.equal(foldCallRecordEx(session, queue, { foldCallRecord: true }).reason, 'not-tail')
+  assert.equal(session.appends.length, 0)
+  // 这一层只负责"不折"；把陈旧待折项丢掉是调用方（foldPending）的事
+  assert.equal(queue.size, 1)
 })
 
 check('并行调用：放弃（不能连累别的调用变孤儿）', () => {
@@ -151,7 +154,7 @@ check('下标错位且没有记录的节点号（旧队列项）：一个字节�
   assert.equal(queue.size, 1)
 })
 
-check('末尾是别人的调用：按登记过的节点号找回自己那一对，不多折别人', () => {
+check('末尾是别人的调用：找回自己那一对，但已经进过请求，所以不折', () => {
   const session = fakeSession(
     [10, 11, 12, 13],
     [
@@ -163,9 +166,28 @@ check('末尾是别人的调用：按登记过的节点号找回自己那一对�
   )
   const queue = new Map()
   rememberFold(queue, 'c1', ['x'], 10)
-  assert.equal(typeof foldCallRecord(session, queue, { foldCallRecord: true }), 'string')
-  assert.deepEqual(session.appends[0].opts.surfaceOp, { op: 'replace', startSeq: 10, endSeq: 11 })
-  assert.equal(queue.size, 0)
+  // 能定位到（按登记的节点号），但尾部不是它 → 拒绝改写，连别人的调用也不碰
+  const r = foldCallRecordEx(session, queue, { foldCallRecord: true })
+  assert.equal(r.reason, 'not-tail')
+  assert.equal(session.appends.length, 0)
+  assert.equal(queue.size, 1)
+})
+
+check('钉住「一个字节都不动」：这一对后面还有节点时，既不折也不改写别的', () => {
+  // 只多一个节点（助手发了一句文本），就足以证明含这一对的请求已经发出去了
+  const session = fakeSession(
+    [10, 11, 12],
+    [callMessage([['compress', 'c1']]), resultMessage('c1'), textMessage('好，接着压')],
+  )
+  const before = session.surface.nodes.slice()
+  const queue = new Map()
+  rememberFold(queue, 'c1', ['x'])
+  // 精确路径报 not-tail；没有 session.log 的桩走兜底路径时报 no-tail-pair——
+  // 两条路都不许写表层，这才是这条用例要钉的东西。
+  const reason = foldCallRecordEx(session, queue, { foldCallRecord: true }).reason
+  assert.ok(reason === 'not-tail' || reason === 'no-tail-pair', `意外原因: ${reason}`)
+  assert.equal(session.appends.length, 0)
+  assert.deepEqual(session.surface.nodes, before)
 })
 
 check('返回是失败的：不折（短注说"已经成功"会变成假话）', () => {
@@ -254,86 +276,21 @@ const textEvent = (text) => ({
   data: { message: { role: 'assistant', content: [{ type: 'text', text }] } },
 })
 
-check('失败回执：只折地图、错误原因逐字留着，且除 content 外字段不变', () => {
-  const failed = '没能压缩：地图过期了\n\n' + MAP_TEXT
-  // 末尾再跟一条助手消息：宿主在构造下一次请求之后才可能是这个形状，
-  // 也就是"模型已经读过那条回执"——只有这种才允许折（回归修复）。
-  const session = preciseSession([10, 11, 12], { 10: callEvent([['compress', 'c1']]), 11: resultEvent('c1', failed), 12: textEvent('好，我再试一次') })
-  const r = shrinkReceipt(session, null)
-  assert.equal(r.done, true)
-  assert.equal(r.kind, 'failed')
-  assert.equal(session.appends.length, 1)
-  const one = session.appends[0]
-  assert.deepEqual(one.opts.surfaceOp, { op: 'replace', startSeq: 11, endSeq: 11 })
-  assert.deepEqual(one.opts.sourceEventSeqs, [11])
-  const text = one.data.message.content[0].text
-  assert.equal(text.startsWith('没能压缩：地图过期了'), true, text)
-  assert.equal(text.includes('压缩须知'), false, '地图必须被折掉')
-  assert.equal(text.includes('地图已折叠'), true)
-  // 除 content 之外逐字段相同（宿主对 tool/result 替换的硬要求）
-  assert.equal(one.data.message.toolCallId, 'c1')
-  assert.equal(one.data.message.role, 'tool')
-})
-
-check('失败回执的 isError 等字段原样保留', () => {
-  const session = preciseSession([10, 11, 12], {
-    10: callEvent([['compress', 'c1']]),
-    11: resultEvent('c1', '没能压缩：x\n\n' + MAP_TEXT, { isError: true }),
-    12: textEvent('再试'),
-  })
-  const r = shrinkReceipt(session, null)
-  assert.equal(r.done, true)
-  assert.equal(session.appends[0].data.message.isError, true)
-})
-
-check('并行调用：不整段替换，只收紧返回正文并销掉待折项', () => {
-  const nodes = [10, 11, 12, 13]
-  const session = preciseSession(nodes, {
-    10: callEvent([['compress', 'c1'], ['context_map', 'c2']]),
-    11: resultEvent('c2', '地图'), // 兄弟调用的返回
+check('并行调用：不折、表层一个字节都不动', () => {
+  // 同一条助手消息里还有兄弟调用：整段替换会连累它们（孤儿 → 每个请求 400）。
+  // 这里也不去改写那条返回的正文——已经进过请求的节点一改，它后面的前缀缓存全部作废。
+  const session = preciseSession([10, 11, 12, 13], {
+    10: callEvent([['context_map', 'c2'], ['compress', 'c1']]),
+    11: resultEvent('c2', '地图'),
     12: resultEvent('c1', 'l0 成功：甲（12 条 -> 省 800 token）\n\n' + MAP_TEXT),
     13: textEvent('接着压'),
   })
   const queue = new Map()
-  rememberFold(queue, 'c1', ['x'], 10)
-  // 精确路径先认出"这条消息里还有别的调用"，因此拒绝整段替换
-  assert.equal(foldCallRecordEx(session, queue, { foldCallRecord: true }).reason, 'parallel-call')
-  const r = shrinkReceipt(session, queue)
-  assert.equal(r.done, true)
-  assert.equal(r.kind, 'parallel')
-  assert.deepEqual(session.appends[0].opts.surfaceOp, { op: 'replace', startSeq: 12, endSeq: 12 })
-  const body = session.appends[0].data.message.content[0].text
-  assert.equal(body.includes('压缩须知'), false)
-  // 地图三段的抬头一行都不能漏：切点是「上下文 …」那行，后面整段都不该留下。
-  assert.equal(body.includes('上下文 '), false)
-  assert.equal(body.includes('下面是分层占用'), false)
-  assert.equal(body.includes('区域 '), false)
-  // 每个键的结果必须留着：压了哪几层、省了多少，是模型接着压的依据。
-  assert.equal(body.includes('l0 成功：甲（12 条 -> 省 800 token）'), true)
-  assert.equal(body.includes('context_map'), true)
-  // 并行这件事必须当场说清：这条回执是模型唯一能读到"别再并行"的地方。
-  assert.equal(body.includes('并行发'), true)
-  assert.equal(body.includes('单独发成一条消息'), true)
-  assert.equal(queue.has('c1'), false)
-})
-
-check('不是我们的返回（没有地图）：一个字节都不动', () => {
-  const session = preciseSession([10, 11], { 10: callEvent([['pwsh', 'c9']]), 11: resultEvent('c9', '普通输出') })
-  assert.equal(shrinkReceipt(session, new Map()).done, false)
+  rememberFold(queue, 'c1', ['x'], 12)
+  const r = foldCallRecordEx(session, queue, { foldCallRecord: true })
+  assert.equal(r.reason, 'parallel-call')
   assert.equal(session.appends.length, 0)
 })
 
-check('末尾那条回执模型还没读过：不许折（回归修复）', () => {
-  // 第 k 步发调用、返回落盘；第 k+1 步的 pre-step 跑在构造请求之前——
-  // 这时候折地图，模型一眼都没看到，只会照着"重新取一次地图"再绕一趟。
-  const session = preciseSession([10, 11], {
-    10: callEvent([['compress', 'c1']]),
-    11: resultEvent('c1', '没能压缩：地图过期了\n\n' + MAP_TEXT),
-  })
-  const r = shrinkReceipt(session, null)
-  assert.equal(r.done, false)
-  assert.equal(r.reason, 'not-read-yet')
-  assert.equal(session.appends.length, 0)
-})
 
 console.log(`callfold 断言测试全部通过（${passed} 项）`)

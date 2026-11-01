@@ -13,7 +13,7 @@ import { issue, forget, restate } from './lib/license.js'
 import { canCompressZone, readZones } from './lib/blocks.js'
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
-import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, shrinkReceipt } from './lib/callfold.js'
+import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf } from './lib/callfold.js'
 import { makeLogger } from './lib/log.js'
 
 export const name = NAME
@@ -166,7 +166,7 @@ export function apply(ctx, rawConfig = {}) {
     ctx.effect(() =>
       commands.register({
         name: 'context-status',
-        description: '看当前上下文的分层占用、块列表与可压位置（只读，不改任何东西；折叠失败会附在末尾）。',
+        description: '看当前上下文的分层占用、块列表与可压位置（只读，不改任何东西；折叠失败或跳过的原因会附在末尾）。',
         handler: (invocation) => {
           try {
             const mapSession = ctx.sessions.get(invocation.agent.id)
@@ -176,10 +176,14 @@ export function apply(ctx, rawConfig = {}) {
             // 这里把它摆到人一眼能看到的地方。
             const queue = foldQueues.get(invocation.agent.id)
             const failure = queue && queue.lastError
-            const suffix = failure
+            const skip = queue && queue.lastSkip
+            const failureText = failure
               ? `\n\n折叠上一次失败（${failure.at}）：${failure.error}\n调用记录原样留着，没有伤到会话；但如果每次都失败，压缩就会多花一份摘要的钱。`
               : ''
-            return { kind: 'success', text: text + suffix }
+            const skipText = skip
+              ? `\n\n折叠上一次跳过（${skip.at}）：${skip.error}\n跳过不等于出错：调用记录没动，表层也没改写。`
+              : ''
+            return { kind: 'success', text: text + failureText + skipText }
           } catch (error) {
             return { kind: 'error', text: `看不了：${String(error && error.message ? error.message : error)}` }
           }
@@ -320,21 +324,19 @@ function foldQueueFor(queues, agentId) {
 
 // 导出仅供测试：这一层是胶水层，纯函数测不到它，而"用了外层作用域的变量却没接收成参数"
 // 这类错误只有真跑一次才会暴露（见 ee1fb7e）。plugin/test/prestep.test.mjs 直接调它。
-export function foldPending(ctx, config, queues, payload, log) {  if (!config.foldCallRecord) return
+export function foldPending(ctx, config, queues, payload, log) {
   const id = payload.agent.id
   const queue = queues.get(id)
+  // 关着的时候不消费队列：留着的待折项过几轮就全是"已经进过请求"的节点，
+  // 重开那天再折它们，等于把那段历史的前缀缓存白废一次。所以关着就直接清空。
+  if (!config.foldCallRecord) {
+    if (queue && queue.size) queue.clear()
+    return
+  }
   try {
     const session = ctx.sessions.get(id)
     if (!session) return
-    if (!queue || queue.size === 0) {
-      // 队列空也可能有活：失败回执没有待折项，但那张地图会随着每次重试永久叠一张。
-      const shrunk = shrinkReceipt(session, null)
-      if (shrunk.done) {
-        log('compress-receipt-shrunk', { agent: id, kind: shrunk.kind })
-        try { restate(id, session) } catch {}
-      }
-      return
-    }
+    if (!queue || queue.size === 0) return
     const r = foldCallRecordEx(session, queue, config)
     if (r.note) {
       log('fold-call-record', { agent: id })
@@ -343,31 +345,22 @@ export function foldPending(ctx, config, queues, payload, log) {  if (!config.fo
       try { restate(id, session) } catch {}
       // 成功就抹掉上一次的失败记录：那个错误已经被下一轮覆盖掉了，不该一直挂在状态里。
       queue.lastError = null
+      queue.lastSkip = null
       queue.failures = 0
       return
     }
-    // 并行调用（同一条助手消息里还有别的调用）：整段替换会让兄弟调用变孤儿，
-    // 只能把带地图的那条返回收紧，并把待折项销掉。
-    if (r.reason === 'parallel-call') {
-      const shrunk = shrinkReceipt(session, queue)
-      if (shrunk.done) {
-        log('fold-call-record-shrunk', { agent: id, kind: shrunk.kind })
-        try { restate(id, session) } catch {}
-        queue.lastError = null
-        queue.failures = 0
-        return
-      }
-    }
-    // 下面是"折不掉"：这些情形都不会自己好转——
-    // 尾部那一对一旦被后来的消息顶走，就再没有任何时刻能折它了。
-    // 所以记一次、把这一条丢掉、并把原因留给 /context-status，不再每轮白撞。
+
+    // 下面是"折不掉"：这些情形都不会自己好转，也不会靠重试变好。
+    // 记一次跳过（不是失败）、把这一条丢掉，原因留给 /context-status，不再每轮白撞。
     if (r.reason === 'empty' || r.reason === 'disabled') return
     if (r.callId) queue.delete(String(r.callId))
-    if (r.reason === 'no-entry' || r.reason === 'no-tail-pair') {
-      // 这两种永远不会好转（尾部那对不是我们的调用 / 已被顶走），
-      // 留着只会占队列上限（QUEUE_LIMIT=4）并每轮重试一次，直接丢。
-      queue.lastError = { at: new Date().toISOString(), error: FOLD_REASON_TEXT[r.reason] || r.reason }
-      log('fold-call-record-dropped', { agent: id, error: queue.lastError.error })
+    const STRUCTURAL = ['no-entry', 'no-tail-pair', 'parallel-call', 'not-tail', 'node-unknown', 'error-result']
+    if (STRUCTURAL.includes(r.reason)) {
+      // 尾部那一对已经不是我们的调用时（no-tail-pair 不带 callId），队列里剩下的全是陈旧项。
+      if (r.reason === 'no-tail-pair') queue.clear()
+      queue.failures = 0
+      queue.lastSkip = { at: new Date().toISOString(), error: FOLD_REASON_TEXT[r.reason] || r.reason }
+      log('fold-call-record-skipped', { agent: id, error: queue.lastSkip.error })
       return
     }
     queue.failures = (queue.failures || 0) + 1
@@ -389,7 +382,8 @@ const FOLD_REASON_TEXT = {
   'node-unknown': '定位不到这次调用在表层上的位置（会话里出现了空节点），这一条不再重试',
   'no-entry': '待折队列里没有这一条（多半是同一 callId 又被调了一次），不再重试',
   'no-tail-pair': '尾部那一对已经不是这次调用了（后来又被别的消息顶走），这一条不再重试',
-  'parallel-call': '这次调用和别的工具调用挤在同一条消息里，整段替换会连累它们，改成只收紧返回正文',
+  'parallel-call': '这次调用和别的工具调用挤在同一条消息里，整段替换会连累它们，所以不折（那份摘要参数副本要等下一次压缩把它遮蔽掉）',
+  'not-tail': '这一对已经不是表层的最后两个节点了（那次请求早发出去了），再改写只会废掉前缀缓存，所以不折',
 }
 
 // 三种触发条件各自独立，同一条提醒里可以同时给出多条理由：
@@ -1095,7 +1089,8 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
       // 增长触发（notice.growthTokens）要等用量爬回压缩前的高度才可能再响——等于报废。
       resetGrowthBaseline(ctx, agent, config, reminded)
-      rememberFold(foldQueueFor(foldQueues, agent.id), exec.callId, lines.slice(), callSeq)
+      // 开关关着就不登记：登记了也没人消费，等到重开那天全是「已经进过请求」的节点。
+      if (config.foldCallRecord !== false) rememberFold(foldQueueFor(foldQueues, agent.id), exec.callId, lines.slice(), callSeq)
       return { text: lines.join('\n') }
       } catch (error) {
         log('compress-execute', { error: errText(error) })
