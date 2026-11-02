@@ -1,7 +1,7 @@
 // 断言：把「compress 调用 + 返回」折成一句短注的三条硬边界。
 // 跑法：node --permission --allow-fs-read=* plugin/test/callfold.test.mjs
 import assert from 'node:assert/strict'
-import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, siblingCompressCount, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
+import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, siblingCompressCount, callNodeOf, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
 
 let passed = 0
 const check = (name, fn) => {
@@ -318,7 +318,7 @@ check('精确路径：贴尾的一对照常折（尾部判据在精确路径也�
   assert.equal(session.appends.length, 1)
 })
 
-// 并发 compress 的闸门（复核二 B5）：以前只看表层最后一个节点。
+// 并发 compress 的闸门（回归修复）：以前只看表层最后一个节点。
 // 交错批 [pwsh, compressA, compressB] 里，pwsh 的返回先落进表层 —— 末节点是那条 tool 结果，
 // 计数会变成 0，闸门静默失效。现在改成往回找"第一张含工具调用的助手消息"。
 check('交错批：末节点是别的工具的返回，仍能数出两个 compress', () => {
@@ -336,6 +336,22 @@ check('正常单个 compress：数为 1', () => {
   log[2] = resultEvent('c1', '压缩成功')
   const session = { surface: { nodes: [1, 2] }, log, deriveEventMessage: (event) => event.data.message }
   assert.equal(siblingCompressCount(session), 1)
+})
+
+check('末节点是兄弟工具的返回：callNodeOf 返回 null，不拿它当调用节点', () => {
+  // 顺序批 [compress, pwsh] 里，compress 执行时表层末节点可能已经是 pwsh 的调用消息。
+  const log = []
+  log[1] = callEvent([['compress', 'c1']])
+  log[2] = callEvent([['pwsh', 'p1']])
+  const session = { surface: { nodes: [1, 2] }, log, deriveEventMessage: (event) => event.data.message }
+  assert.equal(callNodeOf(session, 'c1'), null)
+})
+
+check('末节点正是这次调用的助手消息：callNodeOf 返回该节点', () => {
+  const log = []
+  log[1] = callEvent([['compress', 'c1']])
+  const session = { surface: { nodes: [1] }, log, deriveEventMessage: (event) => event.data.message }
+  assert.equal(callNodeOf(session, 'c1'), 1)
 })
 
 console.log(`callfold 断言测试全部通过（${passed} 项）`)

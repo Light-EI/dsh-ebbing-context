@@ -71,6 +71,28 @@ check('台账行要求按事件号取回', two.line.includes('会话搜索'), tw
 const none = imageLedger(withImages, [22, 99])
 check('没有图片时不写台账行', none.line === '' && none.seqs.length === 0, JSON.stringify(none))
 
+// 一条消息里多张图：张数按图片块数算，不按消息数算（成本侧本来就是按块累加的，
+// 两处口径必须一致，否则台账写 2 张、省钱按 5 张算，模型按台账也找回不全）。
+const multiImage = {
+  messageFor(seq) {
+    if (seq === 30) {
+      return {
+        content: [
+          { type: 'text', text: '三张图' },
+          { type: 'image', source: { type: 'base64' } },
+          { type: 'image', source: { type: 'base64' } },
+          { type: 'image', source: { type: 'base64' } },
+        ],
+      }
+    }
+    if (seq === 31) return { content: [{ type: 'image' }, { type: 'image' }] }
+    return null
+  },
+}
+const multi = imageLedger(multiImage, [30, 31])
+check('一条消息多张图：张数按图片块数算（3+2=5）', multi.count === 5, String(multi.count))
+check('一条消息多张图：台账行写 5 张', multi.line.includes('5 张图片'), multi.line)
+
 const noMapper = imageLedger({}, [21])
 check('拿不到逐节点消息时不算图片（不报错、不写行）', noMapper.line === '', JSON.stringify(noMapper))
 

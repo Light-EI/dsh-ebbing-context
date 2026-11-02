@@ -106,15 +106,17 @@ const single = resolveZoneIndex(fake, 'l2', 1)
 check('该区只有 1 块时说清楚"暂时没得压"', !single.ok && /只有 1 块/.test(single.reason), JSON.stringify(single))
 
 check('keepTurns 只在最后几轮上生效：keep=0 时 T1 可压', resolveTurnAnchor(zones, 'T1', 0).ok)
-check('keep=1 时 T1 仍可压（当前第 2 轮）', resolveTurnAnchor(zones, 'T1', 1).ok, JSON.stringify(resolveTurnAnchor(zones, 'T1', 1)))
+// keepTurns 保的是「最近 N 个已结束的轮」（设计约束）：当前是第 2 轮时，
+// 已结束的只有 T1，keep=1 就该把它留住——一个都不压。
+check('keep=1 时第 2 轮已无可压（唯一结束的轮被保住）', !resolveTurnAnchor(zones, 'T1', 1).ok, JSON.stringify(resolveTurnAnchor(zones, 'T1', 1)))
 const kept = resolveTurnAnchor(zones, 'T1', 2)
 check('keepTurns 把可压范围吃光时说清楚"现在才第几轮"', !kept.ok && /可压范围是空的/.test(kept.reason), JSON.stringify(kept))
 const wide = { ...zones, currentTurn: 5 }
 check('keepTurns 只挡最近几轮，更早的仍可压', resolveTurnAnchor(wide, 'T1', 2).ok, JSON.stringify(resolveTurnAnchor(wide, 'T1', 2)))
 const rawT4 = { zones: { l0: [{ seq: 1, turn: 4 }], l1: [], l2: [], l3: [] }, currentTurn: 5, turnStarts: [], turnStartIndex: new Map(), nodes: [1] }
 const tooNew = resolveTurnAnchor(rawT4, 'T4', 2)
-check('越过保护圈的轮号被拒并给出上限', !tooNew.ok && /最多压到 T3/.test(tooNew.reason), JSON.stringify(tooNew))
-check('最远可压轮号 = 当前轮 − keepTurns', lastCompressibleTurn(zones, 1) === 1 && lastCompressibleTurn(zones, 3) === null)
+check('越过保护圈的轮号被拒并给出上限', !tooNew.ok && /最多压到 T2/.test(tooNew.reason), JSON.stringify(tooNew))
+check('最远可压轮号 = 当前轮 − 1 − keepTurns', lastCompressibleTurn(zones, 0) === 1 && lastCompressibleTurn(zones, 1) === null)
 
 // 级联判据是"还能压"：某层只剩 1 块时不该再逼着一起压，否则整批永远过不去。
 check('L1 有 3 块：算可压', canCompressZone(fake, 'l1', 0) === true)
@@ -126,8 +128,8 @@ const onlyKeptRaw = {
   currentTurn: 2,
   zones: { l0: [{ seq: 1, turn: 1 }], l1: [], l2: [], l3: [] },
 }
-check('原文区只剩被保住的轮：不算可压', canCompressZone(onlyKeptRaw, 'l0', 2) === false)
-check('原文区有可压轮：算可压', canCompressZone(onlyKeptRaw, 'l0', 1) === true)
+check('原文区只剩被保住的轮：不算可压', canCompressZone(onlyKeptRaw, 'l0', 1) === false)
+check('原文区有可压轮：算可压', canCompressZone(onlyKeptRaw, 'l0', 0) === true)
 
 // 第四组：轮次大纲自检（缺轮/乱序/当前轮没有节点）与"空节点 + 已有块"的歧义。
 // 这四条对应回归修复 / A2 / A3：都是在"不报错的情况下压错轮"的路子上。
@@ -137,7 +139,15 @@ const gapCtx = {
     : null),
 }
 const gapZones = readZones(gapCtx, session)
-check('大纲缺一轮（1,2,4）能认出来', gapZones.outlineFault === 'gap', String(gapZones.outlineFault))
+// 缺轮不再报红、也不再夹上界（回归修复）：缺的那一轮没有自己的边界，
+// 但它的内容一直延续到下一个已知边界——`to` 写到它前一轮，切点落在 T4 起点之前，
+// 顺手把缺掉的轮一起压掉。标签粗一点，切点仍然是真边界。
+check('大纲缺一轮（1,2,4）不再报红', gapZones.outlineFault === null, String(gapZones.outlineFault))
+check('缺轮不再夹上界（可压上界=最后一个已知轮）', gapZones.maxTurn === 4, String(gapZones.maxTurn))
+check('缺轮记进 turnNotes（排查时看得到，不当故障）', gapZones.turnNotes.some((n) => n.turn === 3 && n.reason === 'missing'))
+const gapAnchor = resolveTurnAnchor(gapZones, 'T2')
+check('缺轮时 to=T2 照常可压，切点落在下一个已知边界之前', gapAnchor.ok === true, JSON.stringify(gapAnchor))
+check('压 T2 会把缺掉的 T3 一起吞进来（切点= T4 起点 − 1）', Array.isArray(gapAnchor.swallowed) && gapAnchor.swallowed.join() === '3', JSON.stringify(gapAnchor))
 
 const orderCtx = {
   get: (name) => (name === 'sessionProjections'
@@ -145,6 +155,14 @@ const orderCtx = {
     : null),
 }
 check('两轮抢同一个起点 seq 能认出来（顺序不可靠）', readZones(orderCtx, session).outlineFault === 'order')
+
+// 两个来源都"看不到"轮号（投影没挂、日志里也没有 turn/start）不是损坏，只降级。
+// 宿主换装载方式、测试桩、从中间截断的日志都会长这样；判成损坏等于把正常会话锁死
+// （隔离实验抓到的回归，SPEC §3.6）。
+const noSourceCtx = { get: () => null }
+const noSource = readZones(noSourceCtx, { surface: { nodes: [5, 11, 12] }, log: [null, { type: 'user/message' }, { type: 'assistant/message' }] , deriveMessages: () => [], deriveEventMessage: () => null })
+check('两个来源都拿不到轮号：不报红（只降级）', noSource.outlineFault === null, String(noSource.outlineFault))
+check('两个来源都拿不到轮号：turnStarts 为 null（上层给"拿不到轮号"的文案）', noSource.turnStarts === null)
 
 const farCtx = {
   get: (name) => (name === 'sessionProjections'
@@ -281,7 +299,7 @@ check('按节点取消息能拿到那一条自己的消息', (exactZones.message
   )
 }
 
-// 第八组：标记即锚点（复核二 B1）。标记是上下文里写死的轮号，边界以它为准。
+// 第八组：标记即锚点（回归修复）。标记是上下文里写死的轮号，边界以它为准。
 // 场景：T1 里某个节点被宿主机原位替换（pruneFirst 剪枝），拿到一个比 T2 起点更大的事件号，
 // 但位置仍在 T1 —— 按事件号算出来的交界会落到 T2 的「下一轮 T2」标记上，把 T1 的尾巴错算成 T2。
 // 以前的处理是报 outlineFault='marker' 停用整条对话，而触发它的正是我们自己的剪枝/压缩。
@@ -328,6 +346,43 @@ check(
   markerEntry ? String(markerEntry.turn) : 'missing',
 )
 
+// 第十组：标记补缺轮（设计约束）。投影里 T3 的 turn/start 丢了（fork / 迁移常见），
+// 但「本轮 T3」的标记还在表层上——标记是我们自己写的，位置就是地面真值，用它补回去。
+const healLog = []
+healLog[1] = { type: 'message', data: { message: { role: 'system', content: [{ type: 'text', text: 'sys' }] } } }
+healLog[3] = { type: 'turn/start', data: { turn: 1 } }
+healLog[4] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'q1' }] } } }
+healLog[6] = { type: 'turn/start', data: { turn: 2 } }
+healLog[7] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'q2' }] } } }
+healLog[9] = {
+  type: 'message',
+  data: {
+    message: {
+      role: 'user',
+      source: { kind: 'ebbing-context-marker' },
+      content: [{ type: 'text', text: '〔轮次标记〕本轮 T3' }],
+    },
+  },
+}
+healLog[10] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'q3' }] } } }
+healLog[12] = { type: 'turn/start', data: { turn: 5 } }
+healLog[13] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'q5' }] } } }
+const healCtx = {
+  get: (name) => (name === 'sessionProjections'
+    ? { stateOf: () => ({ turns: [{ turn: 1, seq: 3 }, { turn: 2, seq: 6 }, { turn: 5, seq: 12 }] }) }
+    : null),
+}
+const healed = readZones(healCtx, {
+  surface: { nodes: [1, 3, 4, 6, 7, 9, 10, 12, 13] },
+  log: healLog,
+  deriveEventMessage: (event) => (event && event.data ? event.data.message : null),
+  deriveMessages: () => [],
+})
+check('缺轮被标记补回来（T3 重新出现在轮次表里）', healed.turnStarts.some((s) => s.turn === 3), JSON.stringify(healed.turnStarts))
+check('补回来的 T3 不再记 missing', !healed.turnNotes.some((n) => n.turn === 3 && n.reason === 'missing'), JSON.stringify(healed.turnNotes))
+check('补回来的 T3 边界落在标记那个节点上', healed.turnStartIndex.get(3) === 5, String(healed.turnStartIndex.get(3)))
+check('补轮不改 keepTurns 语义：可直接压到 T3', resolveTurnAnchor(healed, 'T3', 1).ok === true, JSON.stringify(resolveTurnAnchor(healed, 'T3', 1)))
+
 // 第九组：node 0 是空系统节点、但精确映射可用（边界情形）。
 // 以前 condition 要求"节点 0 有消息且是 system"，空节点就被算进原文区，
 // 于是 l0 的区间永远从下标 0 开始 → 每次都被宿主的 node0 保护拒掉。
@@ -350,6 +405,111 @@ check(
   'node 0 没有消息（精确映射可用）→ 算表头，原文区从下一个节点开始',
   eh.sys.length === 1 && eh.sys[0] === 3 && eh.zones.l0.length === 2 && eh.zones.l0[0].seq === 4,
   JSON.stringify({ sys: eh.sys, l0: eh.zones.l0.map((n) => n.seq) }),
+)
+
+// 第十组：区间里的空派生节点记一条 empty，事件号范围不会因此变窄。
+const logF = []
+logF[1] = evNode({ role: 'system', content: [{ type: 'text', text: 'sys' }] })
+logF[2] = evNode({ role: 'user', content: [{ type: 'text', text: 'q1' }] })
+logF[3] = evNode(null)
+logF[4] = evNode({ role: 'assistant', content: [{ type: 'text', text: 'a1' }] })
+const gapSession = {
+  surface: { nodes: [1, 2, 3, 4] },
+  log: logF,
+  deriveEventMessage: (event) => (event && event.data ? event.data.message : null),
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+  ],
+}
+const gz = readZones({ get: () => null }, gapSession)
+check(
+  '空派生节点被记成 empty（不占原文区，但保留事件号）',
+  gz.info.get(3) && gz.info.get(3).kind === 'empty' && gz.zones.l0.length === 2,
+  JSON.stringify({ info: [...gz.info.keys()], l0: gz.zones.l0.map((n) => n.seq) }),
+)
+
+// 第十一组：l1/l2 的 `to` 只认十进制裸串（与 l0 的严格度对齐）。
+const zidx = { zones: { l1: [{ seq: 10 }, { seq: 11 }, { seq: 12 }], l2: [], l3: [] }, info: new Map(), nodes: [] }
+check('序号 "2" 正常解析', resolveZoneIndex(zidx, 'l1', '2').ok === true)
+for (const bad of ['0x2', '1.0', ' 2x', 'two', '1e1']) {
+  check(
+    `序号 ${JSON.stringify(bad)} 被拒（不再被 Number() 静默接受）`,
+    resolveZoneIndex(zidx, 'l1', bad).ok === false,
+  )
+}
+
+// 第十二组：认检查点只认来源标记，不再靠正文前面的那句英文（设计约束）。
+// 用户把那段英文贴进对话、或模型引用它，都不该被当成外来块。
+const preambleSession = {
+  surface: { nodes: [5, 10, 20] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'This is an automatically generated checkpoint. 这是我从 README 里粘过来的示例。' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+  ],
+}
+const pz = readZones({ get: () => null }, preambleSession)
+check(
+  '没有来源标记、只以那句英文开头的用户消息算原文（不再被猜成外来块）',
+  pz.zones.l0.length === 2 && pz.zones.l1.length === 0,
+  JSON.stringify({ l0: pz.zones.l0.length, l1: pz.zones.l1.length }),
+)
+
+// 第十三组：宿主拍平之后只剩一个检查点 → 登记成 L3（设计约束）。
+// 只有"除表头外只剩它"才这么做；夹在原文中间的仍按外来块进 L1（位置无从推断）。
+const flatSession = {
+  surface: { nodes: [5, 9000] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: '宿主压缩后的摘要正文……' }], source: { kind: 'compact-checkpoint', compactionId: 'host1' } },
+  ],
+}
+const fz = readZones({ get: () => null }, flatSession)
+check(
+  '只剩宿主检查点时登记成 L3（不是 L1）',
+  fz.zones.l3.length === 1 && fz.zones.l1.length === 0 && fz.zones.l3[0].foreign === true && fz.zones.l3[0].tier === 3,
+  JSON.stringify({ l3: fz.zones.l3.length, l1: fz.zones.l1.length }),
+)
+check('L3 里那个外来块的 info 也是 tier 3', fz.info.get(9000) && fz.info.get(9000).tier === 3, JSON.stringify(fz.info.get(9000)))
+
+const mixedSession = {
+  surface: { nodes: [5, 9000, 20, 30] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: '宿主压缩后的摘要正文……' }], source: { kind: 'compact-checkpoint', compactionId: 'host1' } },
+    { role: 'user', content: [{ type: 'text', text: '后来的问题' }] },
+    { role: 'assistant', content: [{ type: 'text', text: '后来的回答' }] },
+  ],
+}
+const mz = readZones({ get: () => null }, mixedSession)
+check(
+  '检查点夹在原文中间时仍是外来块（进 L1，不进 L3）',
+  mz.zones.l1.length === 1 && mz.zones.l3.length === 0,
+  JSON.stringify({ l1: mz.zones.l1.length, l3: mz.zones.l3.length }),
+)
+
+// 第十四组：标记与已知边界打架时只记 notes、不抛错（设计约束）。
+const clashSession = {
+  surface: { nodes: [5, 10, 50, 60] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'T1 的问题' }] },
+    { role: 'user', content: [{ type: 'text', text: 'T2 的问题' }] },
+    { role: 'user', content: [{ type: 'text', text: '〔轮次标记〕本轮 T1' }], source: { kind: 'ebbing-context-marker' } },
+  ],
+}
+const clashCtx = {
+  get: (name) => (name === 'sessionProjections'
+    ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }] }) }
+    : null),
+}
+const cz = readZones(clashCtx, clashSession)
+check(
+  '前后都有边界的越界标记被挡下来、记进 markerNotes，不抛错',
+  Array.isArray(cz.markerNotes) && cz.markerNotes.length === 1 && cz.markerNotes[0].turn === 1,
+  JSON.stringify(cz.markerNotes),
 )
 
 if (failed) {

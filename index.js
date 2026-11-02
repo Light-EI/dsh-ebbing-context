@@ -111,9 +111,10 @@ const OUR_KINDS = new Set([NOTICE_KIND, MARKER_KIND, FOLD_KIND])
 const OWN_SENTINEL = '〔Ebbing Context 插件注入〕'
 
 export function apply(ctx, rawConfig = {}) {
-  // 老配置项先就地迁移（forgivePct → growthResetPct）：宿主保存配置后不会重新 apply，
-  // 但启动时会，所以这里改一次就够；运行时那层读的也是同一个对象（makeLiveConfig）。
-  migrateConfig(rawConfig)
+  // 老配置项先迁移（forgivePct → growthResetPct、根层的 notifySubagents 挪进 notice）：
+  // 宿主保存配置后不会重新 apply，但启动时会，所以这里改一次就够；运行时那层读的也是同一个对象。
+  // 迁移可能返回拷贝（宿主若冻结配置对象），后续一律用返回值。
+  rawConfig = migrateConfig(rawConfig)
   // 自己先验一遍：不依赖宿主 schema，加载不到 schemastery 也不会静默放过写错的配置。
   // 宿主把带 volatile 标记的字段解析成引用对象（{ get(), [write] }），不是裸值；
   // 直接拿它做 typeof 判断会全部判错（数字/布尔都成了 object），所以先解引用。
@@ -125,11 +126,17 @@ export function apply(ctx, rawConfig = {}) {
   const log = makeLogger('ebbing-context')
   const reminded = new Map() // agentId -> { turn, count }：每轮最多一条，count 用来在第二次起换说法
   // 待发的提醒：命中之后每一步都覆盖一次（最后一步的读数最接近收尾那一刻），
-  // 收尾时按「同一个 AbortSignal」把它认回来——agent/turn-stopping 的载荷只有 { turn, signal }，
-  // 没有 agent，所以不能按 agentId 认。
+  // 收尾时按「同一个 AbortSignal」把它认回来——turn-stopping 的载荷形状是 { turn, signal }，
+  // 不保证带 agent（宿主 0.2.x 会用 agentEvents 融合注入 agent，但那是实现细节、不写进契约），
+  // 所以认领只按 signal，不按 agentId。
   const pendingBySignal = new WeakMap() // 本轮信号 -> 待发记录
   const pendingByAgent = new Map() // agentId -> { signal, record }：只为清理异常收场留下的孤儿
-  const overflowSaid = new Map() // agentId -> 上一次报超限发生在第几轮
+  // agentId -> { turn, count }：这一轮报了超限，以及连着第几次。
+  // 为什么要计数（设计约束）：宿主自带的压缩默认开着（auto: true），
+  // 它会在同一条 request-error 上自己救一次并返回 retry。我们要是当场就宣布"没救"、
+  // 顺手把自动续作缴械，那句话就是假话——所以第一次只给中性提示，连着第二次才认死。
+  // 成功收尾（turn-stopping 会来）就清零，下一次超限重新从"可能能自愈"开始。
+  const overflowSaid = new Map()
   const foldQueues = new Map() // agentId -> Map<callId, { lines }>：等下一次 pre-step 收
 
   // 进程内状态只在会话活着时有意义：会话销毁就清掉，避免这两个表随会话数单调增长。
@@ -176,7 +183,14 @@ export function apply(ctx, rawConfig = {}) {
           try {
             const mapSession = ctx.sessions.get(invocation.agent.id)
         const mapUsage = mapSession ? readUsage(ctx, mapSession, config) : null
-        const text = renderMap(ctx, invocation.agent, config, mapUsage).text
+        const rendered = renderMap(ctx, invocation.agent, config, mapUsage)
+        const text = rendered.text
+        // 标记被跳过不是故障（§3.4 的两道护栏）：只在人手看的状态里提一句，
+        // 免得排查"地图轮号和上下文里的标记对不上"时无从下手。
+        const notes = rendered.zones && rendered.zones.markerNotes
+        const markerText = notes && notes.length
+          ? `\n\n有 ${notes.length} 条〔轮次标记〕与算出来的边界对不上，已跳过（定位仍按事件号，轮号可能偏粗）。`
+          : ''
             // 折叠失败原本只写进日志文件：插件"看起来"一切正常，只是调用记录没折掉、白花 token。
             // 这里把它摆到人一眼能看到的地方。
             const queue = foldQueues.get(invocation.agent.id)
@@ -188,7 +202,7 @@ export function apply(ctx, rawConfig = {}) {
             const skipText = skip
               ? `\n\n折叠上一次跳过（${skip.at}）：${skip.error}\n跳过不等于出错：调用记录没动，表层也没改写。`
               : ''
-            return { kind: 'success', text: text + failureText + skipText }
+            return { kind: 'success', text: text + markerText + failureText + skipText }
           } catch (error) {
             return { kind: 'error', text: `看不了：${String(error && error.message ? error.message : error)}` }
           }
@@ -223,7 +237,7 @@ export function apply(ctx, rawConfig = {}) {
     let stepZones = null
     try {
       const stepSession = ctx.sessions.get(payload.agent.id)
-      if (stepSession) stepZones = readZones(ctx, stepSession)
+      if (stepSession) stepZones = readZones(ctx, stepSession, payload.agent)
     } catch {}
     const broken = quiet ? null : fatalOutline(ctx, payload, stepZones)
     if (broken) throw new Error(broken)
@@ -263,6 +277,22 @@ export function apply(ctx, rawConfig = {}) {
   ctx.on('agent/turn-stopping', async (payload) => {
     try {
       if (isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)) return
+      // 收尾前补一次折叠（设计约束）：压缩恰好是本轮最后一个动作时（被截断、
+      // 用户点了停止、没有下一步了），下面写轮次标记会把「调用 + 返回」挤出队尾，
+      // 下一轮只能判 not-tail 永久放弃——那份参数副本和整张地图此后每轮都要再发一遍。
+      // 这里先折一次：只折队尾那一对（缓存不变式不变），折不成就算了，不重试。
+      // 收尾载荷不保证带 agent（宿主 0.2.x 靠 agentEvents 融合才补上），没有就跳过。
+      // 单独包一层 catch：折叠失败不能把后面的轮次标记一起拖下水——标记缺了，
+      // 下一轮的地图就少一个锚点，比多花几百 token 严重得多。
+      if (payload.agent) {
+        try {
+          foldPending(ctx, config, foldQueues, payload, log)
+        } catch (error) {
+          log('fold-at-turn-end', { error: String((error && error.message) || error) })
+        }
+      }
+      // 这一轮正常收尾 = 请求成功过：超窗的"连着第几次"清零，下次重新从"可能能自愈"开始。
+      if (payload.agent && payload.agent.id) overflowSaid.delete(payload.agent.id)
       flushNotice(ctx, config, reminded, pendingBySignal, pendingByAgent, payload, log)
       // 先发再结算：刚发出去的那条会把 growthPending 记成本轮，这里看到 turn <= pending 就跳过；
       // 真正要结算的是"上一轮发的提醒，这一轮还没压"。
@@ -276,6 +306,9 @@ export function apply(ctx, rawConfig = {}) {
 
   // 真的超了：只报一句，不自动压缩、不重试、不改写历史。
   // 同一轮只报一条：宿主可能在同一轮里重试多次，不去重会把这句话刷屏。
+  // 两次判定（设计约束）：宿主的 compaction-basic 默认 auto: true，它会在
+  // 同一条 request-error 上做 overflow 恢复并返回 retry。第一次超限就宣布"没救"是假话，
+  // 所以第一次只给中性提示（不 disarm）；连着第二次还超，才认死并停掉自动续作。
   ctx.on('agent/request-error', async (payload, next) => {
     // 这个 waterfall 不兜异常（宿主的 emit 兜、waterfall 不兜）：任何一步抛错都会让
     // 这一轮以 error 收场，而且用户看不到超限那句提示。所以整段包起来。
@@ -284,19 +317,35 @@ export function apply(ctx, rawConfig = {}) {
       if (code === CONTEXT_WINDOW_EXCEEDED) {
         const id = payload.agent.id
         const turn = typeof payload.turn === 'number' ? payload.turn : null
-        if (overflowSaid.get(id) !== turn) {
-          overflowSaid.set(id, turn)
-          // 超限就停：不让 goal 自动续作把它一轮一轮地重新撞上去。
+        const prev = overflowSaid.get(id)
+        // 同一轮里宿主可能重试多次（每次失败都派一次 request-error）：只记一次，
+        // 否则一轮五次重试就会被数成"连着两轮"，第一次超窗就缴了自动续作。
+        const repeat = Boolean(prev && prev.turn === turn)
+        const count = repeat ? prev.count : (prev ? prev.count + 1 : 1)
+        overflowSaid.set(id, { turn, count })
+        if (!repeat && count === 1) {
+          log('overflow-first', { agent: id, turn })
+          try {
+            appendNotice(ctx, id,
+              '〔Ebbing Context 超窗提示 · 插件注入，不是用户说的话〕\n' + OWN_SENTINEL + '\n' +
+              '上下文超出窗口，这一轮被服务端拒掉了。宿主自带的压缩如果开着，它可能自己救一次、' +
+              '然后这一轮照常继续——如果下一轮恢复正常，请忽略这句话。' +
+              '要是连着两轮都被服务端拒掉，我会再报一次，那时才真的压不动。')
+          } catch (error) {
+            log('request-error', { agent: id, error: String((error && error.message) || error) })
+          }
+        } else if (!repeat && count === 2) {
+          // 连着第二次：这时候才停。超限就停是不让 goal 自动续作一轮一轮地重新撞上去。
           // disarm 只摘掉「自动续作」这层权限，不动 goal 的落盘状态与人可见的 revision，人随时能 resume。
           try {
             const goals = ctx.get('goals')
             if (goals && typeof goals.disarm === 'function') goals.disarm(payload.agent)
           } catch {}
-          log('overflow', { agent: id, turn })
+          log('overflow-dead', { agent: id, turn })
           try {
             appendNotice(ctx, id,
               '〔Ebbing Context 超窗提示 · 插件注入，不是用户说的话〕\n' + OWN_SENTINEL + '\n' +
-              '上下文超出窗口，这一轮被服务端拒掉了，停在这里、不会自动重试；自动续作也已经停掉。' +
+              '连着两轮都超出窗口，停在这里、不会自动重试；自动续作也已经停掉。' +
               '现在每次请求都还会超窗口，compress 要依附在一次成功的请求上才调得动，所以插件此刻压不动。' +
               '建议把 maxTokens 调小，或者换一个窗口更大的模型，然后发一句话继续。' +
               '如果这两条都做不到，要不要用宿主自带的压缩（它会把分层拍平、原文再也取不回）由你决定——插件不替你选。')
@@ -349,7 +398,7 @@ export function foldPending(ctx, config, queues, payload, log) {
       // 折叠只替换尾部的「调用 + 返回」两条 raw 节点，三层块的 seq 一个都没动；
       // 许可证指纹也只盯这三层的 seq（见 lib/license.js），所以这里不需要再对齐什么。
       // 曾经在此 { restate(id, session, readZones(...)) }：那会让每步多扫一遍表层，
-      // 而按现在的指纹口径它本来就是恒等运算（复核三）。
+      // 而按现在的指纹口径它本来就是恒等运算（回归修复）。
       // 成功就抹掉上一次的失败记录：那个错误已经被下一轮覆盖掉了，不该一直挂在状态里。
       queue.lastError = null
       queue.lastSkip = null
@@ -444,7 +493,7 @@ function fatalOutline(ctx, payload, zones) {
     const session = id ? ctx.sessions.get(id) : null
     if (!session) return null
     if (!Array.isArray(session.log) || session.log.length === 0) return null
-    const live = zones || readZones(ctx, session)
+    const live = zones || readZones(ctx, session, payload && payload.agent)
     if (!live) return null
     // 表层顺序自检（防护性检查）：批次中途失败可能留下层级倒挂的表。
     // 这种表还能对话，但继续压只会把错传下去，所以和"大纲损坏"一样处理：报红、停下。
@@ -462,8 +511,9 @@ function fatalOutline(ctx, payload, zones) {
     // 都被拦下来、而宿主已经把消息从 inbox 取走、不会还回来。这里只处理真损坏。
     if (live.outlineFault !== 'gap' && live.outlineFault !== 'order') return null
     const why = live.outlineFault === 'gap' ? '缺轮' : '乱序'
+    const detail = live.outlineFaultDetail ? `（${live.outlineFaultDetail}）` : ''
     return (
-      `Ebbing Context 已停用这次对话：轮次大纲损坏（${why}）。` +
+      `Ebbing Context 已停用这次对话：轮次大纲损坏（${why}）${detail}。` +
       '判不准每一轮到哪儿结束，再压就可能切错轮次边界、把进行中的内容当成已结束的压掉，' +
       '所以插件拒绝在这种表上继续工作。注意：这一条消息没有被存进历史（宿主已把它从队列取走），' +
       '修好之前请不要再发。要接着用这份历史，请在插件页关掉 Ebbing Context；关掉后本对话恢复可用。'
@@ -518,7 +568,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     if (dropped > Math.max(1, Math.round(st.tokens * 0.05))) {
       st.zonesTurn = null
       // 「压得动」是拿同一份区快照算的：快照作废，这份判断也得跟着重算，
-      // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（复核四）。
+      // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（回归修复）。
       st.compressTurn = null
     }
   }
@@ -530,7 +580,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     st.zonesOver = readZoneOver(session, config, usage.budget, stepZones)
     st.ambiguous = stepZones ? stepZones.ambiguous === true : false
   }
-  // 「哪一层现在真压得动」只在**可能真开口**时才估（复核四）：
+  // 「哪一层现在真压得动」只在**可能真开口**时才估（回归修复）：
   // 估 l0 要把整段原文逐个 token 数一遍，而到线、增长、区超限一件都没发生的那一轮，
   // 这份结果算出来只会被丢掉。先看这一轮到底有没有理由发提醒；同一轮只算一次。
   const maybeTell = onLine || onGrowth ||
@@ -538,7 +588,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   if (maybeTell && st.compressTurn !== turn) {
     st.compressTurn = turn
     try {
-      const live = stepZones || readZones(ctx, session)
+      const live = stepZones || readZones(ctx, session, payload && payload.agent)
       st.ambiguous = live.ambiguous === true
       const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
       // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
@@ -550,11 +600,10 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
         l3: worthCompressing(live, 'l3', keepTurns),
       }
       // l0 压不动有两种原因：内容（只剩 keepTurns 保住的轮）与环境（轮次大纲损坏、
-      // 拿不到轮号）。只有"内容原因"才该拖住深层的提醒——环境坏掉时 l1/l2 照样能用，
-      // 拿它把整个金字塔拖黑，等于地图写着"l1/l2 照常"而提醒永远不发（设计约束）。
-      st.envBlocked = {
-        l0: live.outlineFault !== null || live.turnStarts === null,
-      }
+      // 拿不到轮号、缺轮把上界夹住）。只有"内容原因"才该拖住深层的提醒——环境坏掉时
+      // l1/l2 照样能用，拿它把整个金字塔拖黑，等于地图写着"l1/l2 照常"而提醒永远不发（设计约束）。
+      // 缺轮也归环境：那是"定不了边界"，不是"没内容可压"。
+      st.envBlocked = envBlockedOf(live)
     } catch {
       st.ambiguous = false
       st.compressible = null
@@ -627,6 +676,15 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
 // 所以"上层有块而下层为空"不可能出现，深层的提醒自然也不会响。
 const SHALLOWER = { l1: ['l0'], l2: ['l0', 'l1'], l3: ['l0', 'l1', 'l2'] }
 
+// l0 压不动是"环境原因"还是"内容原因"：环境原因不该把深层的提醒一起拖黑（设计约束）。
+// 三种环境原因：大纲损坏、拿不到轮号、缺轮把上界夹住（缺轮是"定不了边界"，不是"没内容"）。
+export function envBlockedOf(zones) {
+  const missing = Array.isArray(zones && zones.turnNotes) && zones.turnNotes.some((n) => n && n.reason === 'missing')
+  const broken = !!(zones && zones.outlineFault)
+  const noStarts = !!zones && zones.turnStarts === null
+  return { l0: broken || noStarts || missing }
+}
+
 export function zoneNoticeAllowed(key, zoneOver, compressible, envBlocked) {
   if (!zoneOver || !zoneOver[key]) return false
   // 拿不到哪一层压得动（读表层失败）：不拦，宁可多报一次也别静默。
@@ -639,7 +697,7 @@ function newState() {
   return {
     turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null,
     autoTurn: null, ambiguous: false, compressible: null, envBlocked: null, lineOn: false,
-    // 「哪一层压得动」是按轮缓存的（复核四）：只有真要发提醒的那一轮才去估 l0 成本。
+    // 「哪一层压得动」是按轮缓存的（回归修复）：只有真要发提醒的那一轮才去估 l0 成本。
     compressTurn: null,
     // 增长这条触发自己的两格状态（用户要求 第 2 条）：
     // growthQuota = 当前门槛（null 表示用配置里的原额；压不动时砍到一半）
@@ -672,6 +730,11 @@ function settleGrowth(ctx, config, state, payload, log) {
   if (!id) return
   const st = state.get(id)
   if (!st || st.growthPending === null) return
+  // 提醒还挂在 inbox 的 next-turn 里没人认领（用户恰在收尾时插话、或上一轮异常收场）：
+  // 这一轮不是"给它的一轮"，先别结算——否则门槛重设、基线前移，等于白送一次叫醒，
+  // 而那句提醒真正被读到时要再等一轮才有效（设计约束）。
+  // 拿不到 agent 时退回旧口径（按轮号判），不因为少一个字段就把提醒永久卡住。
+  if (payload.agent && pendingNoticeOf(payload.agent)) return
   const turn = typeof payload.turn === 'number' ? payload.turn : null
   // 还在被叫醒的那一轮里：给它这一步的时间，收尾时才结算。
   if (turn === null || turn <= st.growthPending) return
@@ -746,7 +809,7 @@ function markNextTurn(ctx, state, payload, log) {
     st.markedTurn = turn + 1
     return
   }
-  const ok = appendOwn(ctx, id, `〔轮次标记〕下一轮 T${turn + 1}`, MARKER_KIND)
+  const ok = appendOwn(ctx, id, `〔轮次标记〕下一轮 T${turn + 1}`, MARKER_KIND, log)
   if (!ok) return
   st.markedTurn = turn + 1
   log('turn-marker', { agent: id, turn: turn + 1, where: 'turn-end' })
@@ -767,7 +830,7 @@ function ensureTurnMarker(ctx, state, payload, log) {
     st.markedTurn = turn
     return
   }
-  const ok = appendOwn(ctx, id, `〔轮次标记〕本轮 T${turn}（这一轮的内容就在这条标记之后）`, MARKER_KIND)
+  const ok = appendOwn(ctx, id, `〔轮次标记〕本轮 T${turn}（这一轮的内容就在这条标记之后）`, MARKER_KIND, log)
   if (!ok) return
   st.markedTurn = turn
   log('turn-marker', { agent: id, turn, where: 'step-1' })
@@ -916,6 +979,11 @@ function deliverNotice(ctx, config, state, record, log) {
     }
   }
   try {
+    // followup 不可用时的退化路径：直接追加到表层。同样不许在空表层上写（见 appendOwn）。
+    if (surfaceIsEmpty(session)) {
+      log('append-skip-empty-surface', { agent: id, kind: NOTICE_KIND })
+      return
+    }
     session.append('user/message', message, { surfaceOp: 'append' })
     commit()
   } catch (error) {
@@ -997,9 +1065,29 @@ function appendNotice(ctx, agentId, text) {
 // 插件自己往会话里写一条文本节点（提醒 / 轮次标记）。
 // 只能用 user/message：assistant/message 不能带 sourceEventSeqs（插不进去），
 // system/message 会覆盖 historySystem，developer/message 收尾 flush 会抛 unsupported。
-function appendOwn(ctx, agentId, text, kind) {
+function surfaceIsEmpty(session) {
+  try {
+    const nodes = session && session.surface && Array.isArray(session.surface.nodes) ? session.surface.nodes : null
+    return !!nodes && nodes.length === 0
+  } catch {
+    return false
+  }
+}
+
+function appendOwn(ctx, agentId, text, kind, log) {
   const session = ctx.sessions.get(agentId)
   if (!session) return false
+  // 空表层时一个节点都别写（0.1.15 真机事故）。宿主的日志重放校验要求表层第一个
+  // 节点必须是 system/message 才能建立受保护的头：
+  // `ref/pkg-0.2.2-alpha.2/dsh-session-format-v3-to-v4-0.2.2-alpha.2/lib/index.js:599`
+  // 「system/message requires a protected first surface head」。首轮 `pre-step` 跑在
+  // 宿主写系统头之前（`dsh-agent-loop` 先 assemble、再 append `system/message`），
+  // 此时写标记就会抢在头前面——当时跑得好好的，关闭重开后整份日志被判 corrupt，
+  // 会话永远打不开。宁可这一轮没有标记，也不能让日志变成不可读的。
+  if (surfaceIsEmpty(session)) {
+    if (typeof log === 'function') log('append-skip-empty-surface', { agent: agentId, kind })
+    return false
+  }
   try {
     const message = userMessage({ content: [{ type: 'text', text }], source: { kind } })
     session.append('user/message', message, { surfaceOp: 'append' })
@@ -1079,9 +1167,10 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         // 所以调用消息就是最后一个节点。压完之后表层会被我们的产物改掉，
         // 那时再取就取不到了；折叠只能靠这个节点号精确落位。
         // 这一步马上要写表层：先把'这一步内'的用量缓存作废，回执地图必须显示压缩之后的新数（回归修复）。
-        stepStamp = null
+        // 表格按代理分槽，只清自己那格；别的代理的步戳不受影响。
+        stepStamps.delete(agent.id)
         sessionAtCall = ctx.sessions.get(agent.id)
-        const callSeq = sessionAtCall ? callNodeOf(sessionAtCall) : null
+        const callSeq = sessionAtCall ? callNodeOf(sessionAtCall, exec.callId) : null
         // 同一个 callId 可能跨助手消息复用：先作废旧的待折项，
         // 免得这一次失败时，上一轮成功留下的记录把它折成「已经成功」。
         forgetFold(foldQueueFor(foldQueues, agent.id), exec.callId)
@@ -1169,7 +1258,7 @@ function resetGrowthBaseline(ctx, agent, config, state) {
 function issueFor(ctx, agent) {
   try {
     const session = ctx.sessions.get(agent.id)
-    if (session) issue(agent.id, session, readZones(ctx, session))
+    if (session) issue(agent.id, session, readZones(ctx, session, agent))
   } catch {}
 }
 
@@ -1257,8 +1346,10 @@ const usageCache = new WeakMap()
 // 每一步的读数缓存：按会话存，带上"这是哪一步"的戳（缓存粒度）。
 // 以前是一个模块级单槽，两个会话（尤其子代理）交替跑 pre-step 时会互相清掉对方的缓存：
 // 不会算错，但会把很贵的 tokenMeter 反复调用——用户看到的就是"用量数字在跳"。
-const stepMemo = new WeakMap() // session -> { stamp, value }
-let stepStamp = null
+const stepMemo = new WeakMap() // session -> { stamp, seq, value }
+// 步戳按代理分开存（不是模块级单槽）：父代理在 await 期间让出微任务时，
+// 子代理的 pre-step 会把单槽覆盖掉，父代理随后每次读用量都要重算整份表层。
+const stepStamps = new Map() // agentId -> `${turn}:${step}`
 
 function windowOf(ctx, session) {
   try {
@@ -1303,22 +1394,27 @@ function usedOf(ctx, session) {
 //   · usageCache —— 跨步按 seq 兜一层，seq 变了就重算。
 export function readUsage(ctx, session, config) {
   try {
-    if (session && stepStamp) {
-      const memo = stepMemo.get(session)
-      if (memo && memo.stamp === stepStamp) return memo.value
-    }
     const cacheable = session !== null && typeof session === 'object'
     const seq = cacheable && typeof session.seq === 'number' ? session.seq : -1
+    // 步内缓存必须连表层版本一起比：同一步里宿主会 append 助手消息、再逐条落工具结果，
+    // 之后模型调 context_map、人或 /context-status、收尾的 settleGrowth 读的都是"新的表层"。
+    // 只比步戳会让它们拿到这一步请求之前的旧读数（增长基线偏低、下一轮增长虚高）。
+    const agentId = cacheable && typeof session.id === 'string' ? session.id : null
+    const stamp = agentId ? stepStamps.get(agentId) : null
+    if (cacheable && stamp) {
+      const memo = stepMemo.get(session)
+      if (memo && memo.stamp === stamp && memo.seq === seq) return memo.value
+    }
     if (cacheable) {
       const hit = usageCache.get(session)
       if (hit && hit.seq === seq && hit.config === config) {
-        if (session && stepStamp) stepMemo.set(session, { stamp: stepStamp, value: hit.value })
+        if (stamp) stepMemo.set(session, { stamp, seq, value: hit.value })
         return hit.value
       }
     }
     const value = computeUsage(ctx, session, config)
     if (cacheable) usageCache.set(session, { seq, config, value })
-    if (session && stepStamp) stepMemo.set(session, { stamp: stepStamp, value })
+    if (cacheable && stamp) stepMemo.set(session, { stamp, seq, value })
     return value
   } catch {
     return null
@@ -1327,7 +1423,7 @@ export function readUsage(ctx, session, config) {
 
 // 每次 pre-step 开头调用：换一个"步戳"。同一步内的重复读命中缓存，跨步、跨代理各自独立。
 function beginUsageStep(agentId, turn, step) {
-  stepStamp = `${agentId}:${turn}:${step}`
+  stepStamps.set(agentId, `${turn}:${step}`)
 }
 
 function computeUsage(ctx, session, config) {
@@ -1402,7 +1498,7 @@ export function mergeConfig(raw) {
     notice: { ...DEFAULTS.notice, ...(raw.notice || {}) },
     title: { ...DEFAULTS.title, ...(raw.title || {}) },
   }
-  // 取整必须落在**运行时出口**（复核二 B2）：`validateConfig` 收到的是 `unwrapVolatile`
+  // 取整必须落在**运行时出口**（回归修复）：`validateConfig` 收到的是 `unwrapVolatile`
   // 造出来的副本，改那个副本不会回流到 raw；而地图与判轮读的是这里，所以在这里取整。
   if (typeof merged.keepTurns === 'number' && Number.isFinite(merged.keepTurns)) {
     merged.keepTurns = Math.trunc(merged.keepTurns)

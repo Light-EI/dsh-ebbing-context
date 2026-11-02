@@ -122,7 +122,7 @@ try {
   console.error("FAIL 老配置 forgivePct 让插件拒绝启动：" + error.message)
   failed += 1
 }
-// keepTurns 取整必须发生在运行时出口（复核二 B2）：`validateConfig` 改的是解引用后的副本，
+// keepTurns 取整必须发生在运行时出口（回归修复）：`validateConfig` 改的是解引用后的副本，
 // 插件真正读的是 `mergeConfig(raw)` 的结果——那里不取整，地图就会写出 `to=T3.5` 这种解析不了的号。
 {
   const merged = mergeConfig({ keepTurns: 1.5 })

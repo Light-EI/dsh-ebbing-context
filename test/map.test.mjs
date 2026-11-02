@@ -65,6 +65,17 @@ check('地图给出 l1/l2 的块序号范围写法', /可写 to=1–\d+|暂不�
 check('可压位置里不出现「前 N 块」这种没算好的占位说法', !/前 N 块/.test(text), text.slice(0, 600))
 check('l1/l2 可压时直接写真实区间或「一段」', /l1\s+压 L1 区最老的(\s+\d+–\d+ 块|一段)/.test(text) && /l2\s+压 L2 区最老的(\s+\d+–\d+ 块|一段)/.test(text), text.slice(0, 700))
 
+// 缺轮必须在地图上说出来：否则模型只看到「最多压到 T1」却不知道为什么，
+// 会以为插件坏了（user m20995 的裁定：准确保上限，但要让模型知道原因）。
+const gapCtx = {
+  sessions: { get: () => session },
+  get: (name) => (name === 'sessionProjections'
+    ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }, { turn: 4, seq: 60 }] }) }
+    : null),
+}
+const gapText = renderMap(gapCtx, agent, config, usage).text
+check('缺轮时地图说明原因（不再只说可写 to=T1）', /缺了/.test(gapText) && /没有自己的边界/.test(gapText), gapText.slice(0, 400))
+
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)

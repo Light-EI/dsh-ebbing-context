@@ -286,6 +286,24 @@ await check('轮次标记：上一轮收尾已经写好「下一轮」，下一�
   assert.equal(onlyKind(session, MARKER_KIND).length, before, '已有「下一轮 T4」就不该再补一条「本轮 T4」')
 })
 
+await check('空表层（首轮、宿主还没写系统头）→ 任何节点都不许写，避免抢占表层头位', async () => {
+  // 0.1.15 真机事故：首轮 pre-step 跑在宿主 append system/message 之前，
+  // 此时写「本轮 T1」会成为表层第一个节点；运行期没事，关闭重开后宿主重放校验
+  // 要求首节点是 system/message，整份日志被判 corrupt（SessionFormatError）。
+  const session = fakeSession([], [])
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 1000 })
+  session.used = 100
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(1, 1)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  // 收尾也一样：这一轮连请求都没发出去时表层仍是空的
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 1, signal: step.signal, agent: step.agent }, () => {})
+  assert.equal(onlyKind(session, MARKER_KIND).length, 0, '空表层上一条标记都不许写')
+  assert.equal(session.appends.length, 0, '空表层上任何 append 都不许发生')
+})
+
 await check('只叫醒一轮：被叫醒的那轮不再登记第二条，也不连环叫醒', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
@@ -667,6 +685,19 @@ await check('区超限的判据：更浅的层压不动时，这一层不报', a
   assert.equal(zoneNoticeAllowed('l2', over, null, null), true, '拿不到可压状态时不拦')
 })
 
+// 缺轮是"定不了边界"的环境原因，不是"没内容可压"：它必须让 l0 记为环境受阻，
+// 否则深层（l1/l2）超限的提醒会被一起拖黑，永远不发（隔离实验抓到的连坐）。
+await check('缺轮归环境原因：l0 记为环境受阻，深层提醒照发', async () => {
+  const { envBlockedOf, zoneNoticeAllowed } = await import('../index.js')
+  const blocked = envBlockedOf({ outlineFault: null, turnStarts: [{ turn: 1, seq: 9 }], turnNotes: [{ turn: 3, reason: 'missing' }] })
+  assert.equal(blocked.l0, true, '缺轮 → l0 环境受阻')
+  assert.equal(zoneNoticeAllowed('l1', { l1: true, l2: true, l3: true }, { l0: false, l1: true, l2: true, l3: true }, blocked), true, 'l0 环境受阻 → L1 照报')
+  // 反过来：内容原因（只剩被保住的轮）仍要拖住深层。
+  const content = envBlockedOf({ outlineFault: null, turnStarts: [{ turn: 1, seq: 9 }], turnNotes: [] })
+  assert.equal(content.l0, false)
+  assert.equal(zoneNoticeAllowed('l1', { l1: true, l2: true, l3: true }, { l0: false, l1: true, l2: true, l3: true }, content), false, '内容原因压不动 → 拖住 L1')
+})
+
 await check('区超限：轮次大纲坏了、l0 判不出来，但 L2 压得动 → 照报（不把它一起拖黑）', async () => {
   const session = layeredSession(['L1', 'L1', 'L2', 'L2'], 300)
   const ctx = usageCtx(session)
@@ -863,9 +894,9 @@ await check('区超限与增长同一轮都成立：合并成一条提醒，不�
 })
 
 
-await check('轮次大纲损坏：pre-step 直接打红（抛错给宿主，不吞、不发请求）', async () => {
-  // 日志里有 turn/start，但轮号缺了 3 —— 这是"自相矛盾"，不是"看不到"，
-  // 用户要求：这种情况要变成屏幕上的红色错误，本对话不可使用。
+await check('轮次大纲缺一轮：不再打红（夹住上界即可，fork/迁移的会话照常可用）', async () => {
+  // 回归修复 + 设计约束：缺一轮的边界确实不可知，但那是宿主恢复留下的正常痕迹。
+  // 现在的做法是把可压上界夹到缺轮之前，而不是让整条对话永久停摆。
   const messages = [
     { role: 'user', content: [{ type: 'text', text: 'a' }] },
     { role: 'user', content: [{ type: 'text', text: 'b' }] },
@@ -889,8 +920,35 @@ await check('轮次大纲损坏：pre-step 直接打红（抛错给宿主，不�
   } catch (error) {
     thrown = error
   }
+  assert.equal(thrown, null, '缺轮不该把整条对话打红')
+})
+
+await check('轮次大纲两个来源都不可信：pre-step 打红（抛错给宿主，不吞、不发请求）', async () => {
+  // 轮号在时间上倒退（先 T5 后 T3）：这不是"少了一轮"，是自相矛盾，算不出边界。
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'a' }] },
+    { role: 'user', content: [{ type: 'text', text: 'b' }] },
+    { role: 'user', content: [{ type: 'text', text: 'c' }] },
+  ]
+  const nodes = [12, 32, 52]
+  const session = fakeSession(nodes, messages)
+  session.log = []
+  session.log[10] = { type: 'turn/start', data: { turn: 5 } }
+  session.log[30] = { type: 'turn/start', data: { turn: 3 } }
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 1000 })
+  session.used = 100
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(4)
+  let thrown = null
+  try {
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+  } catch (error) {
+    thrown = error
+  }
   assert.ok(thrown, '必须抛出去，让宿主把它显示成红色错误')
-  assert.match(String(thrown.message), /轮次大纲损坏/, '要明说是大纲坏了')
+  assert.match(String(thrown.message), /轮次大纲/, '要明说是大纲坏了')
   assert.match(String(thrown.message), /已停用这次对话/, '要说清本对话已停用')
 })
 
@@ -1046,6 +1104,55 @@ await check('每步只扫一遍表层（三个用途共用同一份，不再各�
   assert.ok(firstStep >= 1, '至少要扫一次（不然什么都不知道）')
   assert.ok(firstStep <= 1, '一步最多扫一次，实际 ' + firstStep + ' 次')
   assert.ok(bothSteps - firstStep <= 1, '第二步也最多一次，实际多了 ' + (bothSteps - firstStep) + ' 次')
+})
+
+// 超窗口（设计约束）：宿主自带压缩默认开着，它会在同一条 request-error 上
+// 自己救一次并 retry。第一次就宣布"没救"是假话，所以第一次只给中性提示、不动自动续作；
+// 连着第二次还超，才认死并缴械。
+await check('超窗口：第一次只给中性提示、不动自动续作；连着第二次才缴械', async () => {
+  const session = usageSession(100)
+  const ctx = usageCtx(session)
+  let disarmed = 0
+  const inner = ctx.get
+  ctx.get = (name) => (name === 'goals' ? { disarm: () => { disarmed += 1 } } : inner(name))
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const handler = ctx.handlers.get('agent/request-error')
+  const agent = { id: 'a1' }
+  const payload = { agent, turn: 5, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }
+  await handler(payload, () => {})
+  assert.equal(disarmed, 0, '第一次不许缴自动续作')
+  const first = onlyKind(session, NOTICE_KIND)
+  assert.equal(first.length, 1, '第一次要给一条提示')
+  const firstText = String(first[0].data.content[0].text)
+  assert.match(firstText, /如果下一轮恢复正常/, '第一次的提示必须说明"可能自愈"')
+  assert.doesNotMatch(firstText, /不会自动重试/, '第一次不能说"没救"')
+  // 同一轮重试三次：只说不数，不能把一轮的重试当成"连着两轮"
+  await handler(payload, () => {})
+  await handler(payload, () => {})
+  await handler(payload, () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一轮重试不许刷屏，也不许升级')
+  assert.equal(disarmed, 0, '同一轮重试好几次仍然不缴')
+  // 下一轮还超：这才算"连着第二次"
+  await handler({ agent, turn: 6, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
+  assert.equal(disarmed, 1, '连着第二次才缴自动续作')
+  const all = onlyKind(session, NOTICE_KIND)
+  assert.equal(all.length, 2, '第二次要给"真的压不动"的提示')
+  assert.match(String(all[1].data.content[0].text), /连着两轮都超出窗口/)
+})
+
+await check('超窗口：中间成功收尾过一轮，计数清零（重新从"可能自愈"开始）', async () => {
+  const session = usageSession(100)
+  const ctx = usageCtx(session)
+  let disarmed = 0
+  const inner = ctx.get
+  ctx.get = (name) => (name === 'goals' ? { disarm: () => { disarmed += 1 } } : inner(name))
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const handler = ctx.handlers.get('agent/request-error')
+  const agent = wakeAgent()
+  await handler({ agent, turn: 5, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: new AbortController().signal, agent }, () => {})
+  await handler({ agent, turn: 6, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
+  assert.equal(disarmed, 0, '中间成功过一轮，下一次超窗仍算"第一次"')
 })
 
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)
