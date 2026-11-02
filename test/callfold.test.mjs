@@ -1,7 +1,7 @@
 // 断言：把「compress 调用 + 返回」折成一句短注的三条硬边界。
 // 跑法：node --permission --allow-fs-read=* plugin/test/callfold.test.mjs
 import assert from 'node:assert/strict'
-import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
+import { rememberFold, forgetFold, foldCallRecord, foldCallRecordEx, buildNote, inspectTail, siblingCompressCount, FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
 
 let passed = 0
 const check = (name, fn) => {
@@ -292,5 +292,50 @@ check('并行调用：不折、表层一个字节都不动', () => {
   assert.equal(session.appends.length, 0)
 })
 
+
+check('精确路径：返回被标成失败 → 不折（不能把失败说成已经成功）', () => {
+  // 审计 S3：以前只有退化路径查 isError，精确路径会把失败回执折成「已经成功」。
+  const session = preciseSession([10, 11], {
+    10: callEvent([['compress', 'c1']]),
+    11: resultEvent('c1', '压缩失败：区间不对', { isError: true }),
+  })
+  const queue = new Map()
+  rememberFold(queue, 'c1', ['x'], 10)
+  const r = foldCallRecordEx(session, queue, { foldCallRecord: true })
+  assert.equal(r.reason, 'error-result')
+  assert.equal(session.appends.length, 0)
+})
+
+check('精确路径：贴尾的一对照常折（尾部判据在精确路径也生效）', () => {
+  const session = preciseSession([10, 11], {
+    10: callEvent([['compress', 'c1']]),
+    11: resultEvent('c1', 'l0 成功：甲（12 条 -> 省 800 token）'),
+  })
+  const queue = new Map()
+  rememberFold(queue, 'c1', ['l0 成功'], 10)
+  const r = foldCallRecordEx(session, queue, { foldCallRecord: true })
+  assert.equal(r.reason, null)
+  assert.equal(session.appends.length, 1)
+})
+
+// 并发 compress 的闸门（复核二 B5）：以前只看表层最后一个节点。
+// 交错批 [pwsh, compressA, compressB] 里，pwsh 的返回先落进表层 —— 末节点是那条 tool 结果，
+// 计数会变成 0，闸门静默失效。现在改成往回找"第一张含工具调用的助手消息"。
+check('交错批：末节点是别的工具的返回，仍能数出两个 compress', () => {
+  const log = []
+  log[1] = callEvent([['pwsh', 'p1'], ['compress', 'c1'], ['compress', 'c2']])
+  log[2] = resultEvent('p1', '工具输出')
+  log[3] = resultEvent('c1', '压缩成功')
+  const session = { surface: { nodes: [1, 2, 3] }, log, deriveEventMessage: (event) => event.data.message }
+  assert.equal(siblingCompressCount(session), 2)
+})
+
+check('正常单个 compress：数为 1', () => {
+  const log = []
+  log[1] = callEvent([['compress', 'c1']])
+  log[2] = resultEvent('c1', '压缩成功')
+  const session = { surface: { nodes: [1, 2] }, log, deriveEventMessage: (event) => event.data.message }
+  assert.equal(siblingCompressCount(session), 1)
+})
 
 console.log(`callfold 断言测试全部通过（${passed} 项）`)

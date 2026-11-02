@@ -281,6 +281,77 @@ check('按节点取消息能拿到那一条自己的消息', (exactZones.message
   )
 }
 
+// 第八组：标记即锚点（复核二 B1）。标记是上下文里写死的轮号，边界以它为准。
+// 场景：T1 里某个节点被宿主机原位替换（pruneFirst 剪枝），拿到一个比 T2 起点更大的事件号，
+// 但位置仍在 T1 —— 按事件号算出来的交界会落到 T2 的「下一轮 T2」标记上，把 T1 的尾巴错算成 T2。
+// 以前的处理是报 outlineFault='marker' 停用整条对话，而触发它的正是我们自己的剪枝/压缩。
+const mkLog = []
+mkLog[3] = { type: 'turn/start', data: { turn: 1 } }
+mkLog[7] = { type: 'turn/start', data: { turn: 2 } }
+mkLog[1] = { type: 'message', data: { message: { role: 'system', content: [{ type: 'text', text: 'sys' }] } } }
+mkLog[5] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'T1 question' }] } } }
+mkLog[20] = { type: 'message', data: { message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'T1 pruned result' }] } } }
+mkLog[8] = {
+  type: 'message',
+  data: {
+    message: {
+      role: 'user',
+      source: { kind: 'ebbing-context-marker' },
+      content: [{ type: 'text', text: '〔轮次标记〕下一轮 T2' }],
+    },
+  },
+}
+mkLog[9] = { type: 'message', data: { message: { role: 'user', content: [{ type: 'text', text: 'T2 question' }] } } }
+const repaired = readZones(
+  { get: () => null },
+  {
+    surface: { nodes: [1, 5, 20, 8, 9] },
+    log: mkLog,
+    deriveEventMessage: (event) => (event && event.data ? event.data.message : null),
+    deriveMessages: () => [],
+  },
+)
+check(
+  '标记与事件号不一致不再报红（outlineFault 为 null）',
+  repaired.outlineFault === null,
+  String(repaired.outlineFault),
+)
+check(
+  '「下一轮 T2」把 T2 的交界钉在它后面一格（不是那条被替换节点）',
+  repaired.turnStartIndex.get(2) === 4,
+  String(repaired.turnStartIndex.get(2)),
+)
+const markerEntry = repaired.zones.l0.find((n) => n.seq === 8)
+check(
+  '标记自己仍算在 T1（不被事件号法抢到 T2）',
+  markerEntry && markerEntry.turn === 1,
+  markerEntry ? String(markerEntry.turn) : 'missing',
+)
+
+// 第九组：node 0 是空系统节点、但精确映射可用（审计 S2）。
+// 以前 condition 要求"节点 0 有消息且是 system"，空节点就被算进原文区，
+// 于是 l0 的区间永远从下标 0 开始 → 每次都被宿主的 node0 保护拒掉。
+const evNode = (message) => ({ type: 'message', data: { message } })
+const logE = []
+logE[3] = evNode(null)
+logE[4] = evNode({ role: 'user', content: [{ type: 'text', text: 'q' }] })
+logE[5] = evNode({ role: 'assistant', content: [{ type: 'text', text: 'a' }] })
+const emptyHead = {
+  surface: { nodes: [3, 4, 5] },
+  log: logE,
+  deriveEventMessage: (event) => (event && event.data ? event.data.message : null),
+  deriveMessages: () => [
+    { role: 'user', content: [{ type: 'text', text: 'q' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'a' }] },
+  ],
+}
+const eh = readZones({ get: () => null }, emptyHead)
+check(
+  'node 0 没有消息（精确映射可用）→ 算表头，原文区从下一个节点开始',
+  eh.sys.length === 1 && eh.sys[0] === 3 && eh.zones.l0.length === 2 && eh.zones.l0[0].seq === 4,
+  JSON.stringify({ sys: eh.sys, l0: eh.zones.l0.map((n) => n.seq) }),
+)
+
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)

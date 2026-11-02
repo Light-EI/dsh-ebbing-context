@@ -2,6 +2,7 @@
 // 跑法：node plugin/test/config.test.mjs
 import { readFileSync } from 'node:fs'
 import { validateConfig, DEFAULTS } from '../lib/config.js'
+import { mergeConfig } from '../index.js'
 
 const KNOWN_TOP = ['budget', 'segment', 'title', 'notice', 'pruneFirst', 'foldCallRecord', 'requireSessionQuery', 'reservedTokens', 'triggerPct', 'keepTurns']
 
@@ -121,8 +122,17 @@ try {
   console.error("FAIL 老配置 forgivePct 让插件拒绝启动：" + error.message)
   failed += 1
 }
+// keepTurns 取整必须发生在运行时出口（复核二 B2）：`validateConfig` 改的是解引用后的副本，
+// 插件真正读的是 `mergeConfig(raw)` 的结果——那里不取整，地图就会写出 `to=T3.5` 这种解析不了的号。
+{
+  const merged = mergeConfig({ keepTurns: 1.5 })
+  if (merged.keepTurns !== 1) {
+    console.error('FAIL mergeConfig 没有把 keepTurns 取整：' + String(merged.keepTurns))
+    failed += 1
+  }
+}
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
 }
-console.log('config 断言测试全部通过（' + 14 + ' 项）')
+console.log('config 断言测试全部通过（' + 15 + ' 项）')
