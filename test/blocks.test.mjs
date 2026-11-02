@@ -268,6 +268,30 @@ check('按节点取消息能拿到那一条自己的消息', (exactZones.message
   )
 }
 
+// 没有投影 + 日志里有重号 turn/start（fork/迁移/异常重试的痕迹）：必须去重救回来，
+// 不能因为"单一来源没去重"就判 order、把整条对话停掉（回归修复）。
+{
+  const log = []
+  log[5] = { type: 'turn/start', data: { turn: 1 } }
+  log[10] = { type: 'turn/start', data: { turn: 2 } }
+  log[99] = { type: 'turn/start', data: { turn: 2 } }
+  const dirty = {
+    surface: { nodes: [5, 10, 99] },
+    log,
+    deriveMessages: () => [
+      { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+      { role: 'user', content: [{ type: 'text', text: 'T1' }] },
+      { role: 'user', content: [{ type: 'text', text: 'T2' }] },
+    ],
+  }
+  const dirtyZones = readZones({ get: () => null }, dirty)
+  check(
+    '没有投影 + 日志重号：按轮号去重保首现，不判损坏',
+    dirtyZones.outlineFault === null && Array.isArray(dirtyZones.turnStarts) && dirtyZones.turnStarts.length === 2,
+    JSON.stringify({ fault: dirtyZones.outlineFault, starts: dirtyZones.turnStarts }),
+  )
+}
+
 // 投影自己也可能是坏的（缺轮、乱序）。这时不能一口咬定"大纲不连续"就永久拒压：
 // 日志里的 turn/start 是完备的，换那条路读出来的串是连续的，就该照它干。
 {

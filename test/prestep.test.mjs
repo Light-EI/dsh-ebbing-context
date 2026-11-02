@@ -1155,4 +1155,23 @@ await check('超窗口：中间成功收尾过一轮，计数清零（重新从"
   assert.equal(disarmed, 0, '中间成功过一轮，下一次超窗仍算"第一次"')
 })
 
+// 静默子代理（notifySubagents=false）收尾时插件早退，但超窗计数必须照样清零——
+// 否则它自愈一次之后再超一次，就会被误判成"连着两轮"并缴掉它的自动续作（回归修复）。
+await check('超窗口：静默子代理收尾也会清零，不会把两次隔轮超窗算成"连着两轮"', async () => {
+  const session = usageSession(100)
+  const ctx = usageCtx(session)
+  let disarmed = 0
+  const inner = ctx.get
+  const sub = { id: 'sub-1', isSubagent: true, role: 'subagent' }
+  ctx.get = (name) => (name === 'goals' ? { disarm: () => { disarmed += 1 } } : inner(name))
+  ctx.agents = { requireInitiator: () => sub, get: (id) => (id === 'sub-1' ? sub : null) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+  const handler = ctx.handlers.get('agent/request-error')
+  await handler({ agent: sub, turn: 5, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
+  // 这一轮正常收尾（静默子代理，插件不投递任何东西，但计数要清）
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: new AbortController().signal, agent: sub }, () => {})
+  await handler({ agent: sub, turn: 6, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
+  assert.equal(disarmed, 0, '中间成功过一轮，下一次超窗仍算"第一次"（静默子代理同样适用）')
+})
+
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

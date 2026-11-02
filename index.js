@@ -148,6 +148,9 @@ export function apply(ctx, rawConfig = {}) {
     pendingByAgent.delete(id)
     overflowSaid.delete(id)
     foldQueues.delete(id)
+    // 按步的用量缓存也清掉：以前只在 compress 出口删自己的键，从不压缩的代理（尤其子代理）
+    // 会一直留一条 agentId → 步戳（回归修复）。
+    stepStamps.delete(id)
     forget(id)
   })
 
@@ -237,7 +240,7 @@ export function apply(ctx, rawConfig = {}) {
     let stepZones = null
     try {
       const stepSession = ctx.sessions.get(payload.agent.id)
-      if (stepSession) stepZones = readZones(ctx, stepSession, payload.agent)
+      if (stepSession) stepZones = readZones(ctx, stepSession, payload.agent, log)
     } catch {}
     const broken = quiet ? null : fatalOutline(ctx, payload, stepZones)
     if (broken) throw new Error(broken)
@@ -276,7 +279,12 @@ export function apply(ctx, rawConfig = {}) {
   // 同理要自己兜异常：抛出去会拦掉宿主的收尾流程。
   ctx.on('agent/turn-stopping', async (payload) => {
     try {
-      if (isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)) return
+      if (isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)) {
+        // 静默子代理也要清超窗计数：它同样会走 request-error 记一笔，而收尾被这里早退，
+        // 攒两次就变成"连着两轮超窗"、误停它的自动续作（回归修复）。
+        if (payload.agent && payload.agent.id) overflowSaid.delete(payload.agent.id)
+        return
+      }
       // 收尾前补一次折叠（设计约束）：压缩恰好是本轮最后一个动作时（被截断、
       // 用户点了停止、没有下一步了），下面写轮次标记会把「调用 + 返回」挤出队尾，
       // 下一轮只能判 not-tail 永久放弃——那份参数副本和整张地图此后每轮都要再发一遍。
@@ -588,7 +596,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   if (maybeTell && st.compressTurn !== turn) {
     st.compressTurn = turn
     try {
-      const live = stepZones || readZones(ctx, session, payload && payload.agent)
+      const live = stepZones || readZones(ctx, session, payload && payload.agent, log)
       st.ambiguous = live.ambiguous === true
       const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
       // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
@@ -1176,7 +1184,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         forgetFold(foldQueueFor(foldQueues, agent.id), exec.callId)
         let result
         try {
-          result = await runCompress(ctx, agent, args || {}, config)
+          result = await runCompress(ctx, agent, args || {}, config, log)
         } catch (error) {
           // 兜底：任何没被预料到的异常都要变成一句中文原因，别把 JS 堆栈甩给模型
           result = { ok: false, reason: '压缩时出错了：' + errText(error) }
@@ -1202,6 +1210,11 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       )
       if (result.prunedChars > 0) {
         lines.push(`顺带把超大的工具结果剪短了 ${result.prunedChars} 个字符（原文仍在日志里，可查回）。`)
+      }
+      // 切点跨过了缺轮：说明一句，免得块头标签（只写到 to）看起来像漏压了内容。
+      const swallowed = result.results.flatMap((r) => (Array.isArray(r.swallowed) ? r.swallowed : []))
+      if (swallowed.length) {
+        lines.push(`这次切点跨过了轮次记录里缺失的 ${swallowed.map((t) => `T${t}`).join('、')}——它们的内容已经一起压进块里，块头标签只写到 to 那一轮。`)
       }
       // 登记待折叠：真正的替换发生在下一次 pre-step（那时工具返回才存在）。
       // 注意顺序：刷新后的地图必须在 rememberFold **之前**并进 lines，否则它跟着被折掉的结果一起消失——
