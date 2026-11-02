@@ -1,8 +1,10 @@
 {
   "name": "dsh-ebbing-context",
   "version": "0.1.15",
-  "private": true,
-  "description": "DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，只写宿主本来就认识的会话事件。",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "DSH 原生分层上下文压缩：模型自己把旧对话折成三层摘要，只写宿主本来就认识的会话事件。名字取自「渐渐消退」——模拟记忆的自然衰退，越旧的内容分辨率越低，但不是删掉。",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -18,14 +20,42 @@
     "dsh.bundle.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "keywords": [
-    "cordis",
+    "dsh",
+    "dsh-plugin",
     "dsh-bundle",
+    "cordis",
     "cordis-plugin",
-    "dsh-plugin"
+    "context",
+    "context-compression",
+    "compaction",
+    "memory",
+    "layered",
+    "ebbing",
+    "ebbing-context",
+    "ebing-context"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Light-EI/dsh-ebbing-context.git"
+  },
+  "homepage": "https://github.com/Light-EI/dsh-ebbing-context#readme",
+  "bugs": {
+    "url": "https://github.com/Light-EI/dsh-ebbing-context/issues"
+  },
+  "author": "Light-EI",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/blocks.test.mjs && node test/compress.test.mjs && node test/callfold.test.mjs && node test/config.test.mjs && node test/map.test.mjs && node test/prestep.test.mjs && node test/usage.test.mjs && node test/scope.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --check lib/blocks.js && node --check lib/callfold.js && node --check lib/compress.js && node --check lib/config.js && node --check lib/license.js && node --check lib/log.js && node --check lib/map.js && node --check lib/messages.js && node --check lib/tokens.js",
+    "pack": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true})\" && npm pack --pack-destination dist",
+    "prepublishOnly": "npm run check && npm test"
+  },
   "dsh": {
     "bundle": {
       "patch": "./dsh.bundle.patch.yml"
