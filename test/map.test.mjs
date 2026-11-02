@@ -60,6 +60,16 @@ check('地图带可压位置段', /可压位置/.test(text))
 check('地图带压缩须知段', /压缩须知/.test(text))
 check('地图给出 l0 的轮号范围写法', /可写 to=T\d+–T\d+|暂不可用/.test(text))
 check('地图给出 l1/l2 的块序号范围写法', /可写 to=1–\d+|暂不可用/.test(text))
+// 外来块（没有块头）的出身：查不到压缩事务时必须在地图上说明，否则模型只看到"什么都压不动"。
+const ckSession = {
+  surface: { nodes: [5, 9000] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: '宿主压缩留下的摘要' }], source: { kind: 'compact-checkpoint', compactionId: 'c9' } },
+  ],
+}
+const ckText = renderMap({ sessions: { get: () => ckSession }, get: (n) => (n === 'sessionProjections' ? { stateOf: () => ({ turns: [] }) } : null) }, agent, config, usage).text
+check('外来块查不到压缩记录时，地图说明出身没核实', /出身没核实/.test(ckText), ckText.slice(0, 600))
 // 压不动时不能再出现「前 N 块」这种半截话：N 该由插件算好，不该让模型猜。
 // 有可压范围就写真实区间（压 L1 区最老的 1–3 块），没有就写「一段」。
 check('可压位置里不出现「前 N 块」这种没算好的占位说法', !/前 N 块/.test(text), text.slice(0, 600))

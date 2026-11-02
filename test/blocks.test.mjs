@@ -485,6 +485,12 @@ check(
 // 只有"除表头外只剩它"才这么做；夹在原文中间的仍按外来块进 L1（位置无从推断）。
 const flatSession = {
   surface: { nodes: [5, 9000] },
+  // 出身核对：日志里真有这次压缩事务（compaction/start + compaction/summary 同 id），
+  // 才算"宿主真的压过"，这是升 L3 的前提（设计约束）。
+  log: [
+    { type: 'compaction/start', data: { compactionId: 'host1' } },
+    { type: 'compaction/summary', data: { compactionId: 'host1' } },
+  ],
   deriveMessages: () => [
     { role: 'system', content: [{ type: 'text', text: 'sys' }] },
     { role: 'user', content: [{ type: 'text', text: '宿主压缩后的摘要正文……' }], source: { kind: 'compact-checkpoint', compactionId: 'host1' } },
@@ -497,6 +503,50 @@ check(
   JSON.stringify({ l3: fz.zones.l3.length, l1: fz.zones.l1.length }),
 )
 check('L3 里那个外来块的 info 也是 tier 3', fz.info.get(9000) && fz.info.get(9000).tier === 3, JSON.stringify(fz.info.get(9000)))
+
+// 冒充的检查点：kind 对、compactionId 也有，但日志里根本没有这次压缩事务。
+// 内容是什么谁也不知道，只能当外来块留在 L1，绝不升 L3（设计约束）。
+const fakeLog = []
+const fakeSession = {
+  surface: { nodes: [5, 9000] },
+  log: [{ type: 'compaction/summary', data: { compactionId: 'other' } }],
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: '伪装成宿主摘要的一段话' }], source: { kind: 'compact-checkpoint', compactionId: 'host-forged' } },
+  ],
+}
+const forged = readZones({ get: () => null }, fakeSession, null, (event, data) => fakeLog.push([event, data]))
+check(
+  '出身对不上的检查点：留在 L1，不升 L3',
+  forged.zones.l1.length === 1 && forged.zones.l3.length === 0 && forged.zones.l1[0].proven === false,
+  JSON.stringify({ l1: forged.zones.l1.length, l3: forged.zones.l3.length, proven: forged.zones.l1[0].proven }),
+)
+check('出身对不上会记一条 foreign-block-unproven', fakeLog.some(([event]) => event === 'foreign-block-unproven'), JSON.stringify(fakeLog.map(([e]) => e)))
+// 同一条里只报一次：每个 pre-step 都报一遍会把滚动日志刷满（找茬意见 2）。
+const before = fakeLog.length
+readZones({ get: () => null }, fakeSession, null, (event, data) => fakeLog.push([event, data]))
+check('同一条未证实的块不重复刷日志', fakeLog.length === before, `${before} -> ${fakeLog.length}`)
+
+// 缓存不能只看长度：日志被改写但长度不变时，出身判定必须跟着变（找茬报告的真缺陷 1）。
+const rewriteLog = [{ type: 'compaction/start', data: { compactionId: 'a' } }]
+const rewriteSession = {
+  surface: { nodes: [5, 9000] },
+  log: rewriteLog,
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'compact-checkpoint', compactionId: 'a' } },
+  ],
+}
+const rw1 = readZones({ get: () => null }, rewriteSession)
+rewriteLog[0] = { type: 'compaction/start', data: { compactionId: 'b' } } // 同长度改写
+const rw2 = readZones({ get: () => null }, rewriteSession)
+rewriteLog[0] = { type: 'compaction/start', data: { compactionId: 'a' } }
+const rw3 = readZones({ get: () => null }, rewriteSession)
+check(
+  '同长度改写日志后重新核对出身（改掉 → 不认；改回 → 又认）',
+  rw1.zones.l3.length === 1 && rw2.zones.l3.length === 0 && rw2.zones.l1[0].proven === false && rw3.zones.l3.length === 1,
+  JSON.stringify({ rw1: rw1.zones.l3.length, rw2: rw2.zones.l3.length, rw3: rw3.zones.l3.length }),
+)
 
 const mixedSession = {
   surface: { nodes: [5, 9000, 20, 30] },
@@ -535,6 +585,28 @@ check(
   Array.isArray(cz.markerNotes) && cz.markerNotes.length === 1 && cz.markerNotes[0].turn === 1,
   JSON.stringify(cz.markerNotes),
 )
+
+// 第十八组：块头写了 `T?+`（盖到哪几轮不可知）的 L3 块，照样能被 l3 再收一次。
+// 宿主拍平之后我们只能把那个检查点登记成 L3；它的轮号永远是"不知道"，
+// 但 l3 按块收、不看轮号——不能因为轮号糊了就把整条 L3 判死（用户 0.1.16 追问）。
+const unknownHeadSession = {
+  surface: { nodes: [5, 70, 80] },
+  deriveMessages: () => [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: '〔L3｜T?+｜ev 12–40〕宿主拍平之后留下的那一块\n正文 A' }], source: { kind: 'compact-checkpoint' } },
+    { role: 'user', content: [{ type: 'text', text: '〔L3｜T4–T6｜ev 90–120〕我们自己压出来的一块\n正文 B' }], source: { kind: 'compact-checkpoint' } },
+  ],
+}
+const unknownCtx = {
+  get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }] }) } : null),
+}
+const uz = readZones(unknownCtx, unknownHeadSession)
+check('`T?+` 的块被认成 L3 块（不是原文、不是外来孤儿）', uz.zones.l3.length === 2 && uz.zones.l0.length === 0, JSON.stringify(uz.zones.l3.length))
+check('`T?+` 解析成"轮号未知"，不会被误读成某个具体轮', (() => {
+  const meta = parseHeader('〔L3｜T?+｜ev 12–40〕标题').meta
+  return meta && meta.tier === 3 && meta.turns[0] === null && meta.turns[1] === null
+})())
+check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮号）', canCompressZone(uz, 'l3') === true)
 
 if (failed) {
   console.error(`\n${failed} 项失败`)
