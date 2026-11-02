@@ -328,7 +328,7 @@ check(
   markerEntry ? String(markerEntry.turn) : 'missing',
 )
 
-// 第九组：node 0 是空系统节点、但精确映射可用（审计 S2）。
+// 第九组：node 0 是空系统节点、但精确映射可用（边界情形）。
 // 以前 condition 要求"节点 0 有消息且是 system"，空节点就被算进原文区，
 // 于是 l0 的区间永远从下标 0 开始 → 每次都被宿主的 node0 保护拒掉。
 const evNode = (message) => ({ type: 'message', data: { message } })

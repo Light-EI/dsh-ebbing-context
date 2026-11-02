@@ -19,7 +19,7 @@ import { makeLogger } from './lib/log.js'
 export const name = NAME
 // 宿主会按这份表决定"服务没就绪就不加载插件"。`sessionProjections` 只是性能退路
 // （读轮次大纲的投影），缺了还能从会话日志里算，所以不进 inject，改用 ctx.get() 软取——
-// 否则一个可选投影出问题就会让整个插件起不来（审计 S5）。
+// 否则一个可选投影出问题就会让整个插件起不来（可选依赖）。
 export const inject = ['tools', 'sessions', 'tokenMeter', 'agents']
 
 // 配置校验：宿主只在拿到 Config 时才会校验 bundle patch 里的 config。
@@ -446,7 +446,7 @@ function fatalOutline(ctx, payload, zones) {
     if (!Array.isArray(session.log) || session.log.length === 0) return null
     const live = zones || readZones(ctx, session)
     if (!live) return null
-    // 表层顺序自检（审计 S1）：批次中途失败可能留下层级倒挂的表。
+    // 表层顺序自检（防护性检查）：批次中途失败可能留下层级倒挂的表。
     // 这种表还能对话，但继续压只会把错传下去，所以和"大纲损坏"一样处理：报红、停下。
     const order = zoneOrderFault(live)
     if (order) {
@@ -542,7 +542,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
       st.ambiguous = live.ambiguous === true
       const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
       // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
-      // 因为叫醒之后大概率只能换来一次失败（审计存疑 5）。
+      // 因为叫醒之后大概率只能换来一次失败（成本口径）。
       st.compressible = {
         l0: worthCompressing(live, 'l0', keepTurns),
         l1: worthCompressing(live, 'l1', keepTurns),
@@ -1254,7 +1254,7 @@ function requireAgent(ctx, exec) {
 // 这里做一个按会话 + 日志序号的小缓存：同一轮里提醒、地图、状态命令共用一次测量，
 // measure() 自己会克隆整份表层（O(表层节点数)），不缓存的话每轮要算好几遍。
 const usageCache = new WeakMap()
-// 每一步的读数缓存：按会话存，带上"这是哪一步"的戳（审计存疑 4）。
+// 每一步的读数缓存：按会话存，带上"这是哪一步"的戳（缓存粒度）。
 // 以前是一个模块级单槽，两个会话（尤其子代理）交替跑 pre-step 时会互相清掉对方的缓存：
 // 不会算错，但会把很贵的 tokenMeter 反复调用——用户看到的就是"用量数字在跳"。
 const stepMemo = new WeakMap() // session -> { stamp, value }

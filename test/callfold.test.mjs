@@ -294,7 +294,7 @@ check('并行调用：不折、表层一个字节都不动', () => {
 
 
 check('精确路径：返回被标成失败 → 不折（不能把失败说成已经成功）', () => {
-  // 审计 S3：以前只有退化路径查 isError，精确路径会把失败回执折成「已经成功」。
+  // 回归修复：以前只有退化路径查 isError，精确路径会把失败回执折成「已经成功」。
   const session = preciseSession([10, 11], {
     10: callEvent([['compress', 'c1']]),
     11: resultEvent('c1', '压缩失败：区间不对', { isError: true }),
