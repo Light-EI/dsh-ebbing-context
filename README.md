@@ -67,7 +67,7 @@ dsh plugin add ./dsh-ebbing-context
 ## 依赖与边界
 
 - 需要宿主提供 `agent/pre-step`、`agent/turn-stopping`、`agent/followup` 与会话表层 API。
-- 默认要求装「会话搜索」（`session_search` 等），取不回原文就不让压。
+- 默认要求装「会话搜索」（`session_event_read` / `session_event_search`），取不回原文就不让压。
 - 只做"成对替换"或"只改 `tool/result` 正文"，从不单点删节点。
 - 不联网、不读文件、不收集遥测。
 
