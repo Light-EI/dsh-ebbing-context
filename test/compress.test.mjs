@@ -66,7 +66,7 @@ const withImages = {
 const two = imageLedger(withImages, [21, 22, 23])
 check('两块有图：清单按事件号列出', two.seqs.join(',') === '21,23', two.seqs.join(','))
 check('台账行写清张数与事件号', two.line.includes('2 张图片') && two.line.includes('21、23'), two.line)
-check('台账行要求按事件号取回', two.line.includes('会话搜索'), two.line)
+check('台账行要求按事件号取回，并指明用哪个工具', two.line.includes('事件号') && two.line.includes('session_event_read'), two.line)
 
 const none = imageLedger(withImages, [22, 99])
 check('没有图片时不写台账行', none.line === '' && none.seqs.length === 0, JSON.stringify(none))
@@ -98,7 +98,7 @@ check('拿不到逐节点消息时不算图片（不报错、不写行）', noMa
 
 // 上一层只列前 6 个事件号，但"张数"必须是真数：合并时按它写的总数接手，
 // 而不是按它列出来的几个号重算（回归修复：100 张会被缩成 6 张）。
-const bigLedger = '〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要看图时用会话搜索按事件号查看。〕'
+const bigLedger = '〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要时用 session_event_read 按事件号读。〕'
 const inherited = imageLedger({ messageFor: (seq) => (seq === 50 ? { content: [{ type: 'text', text: bigLedger }] } : null) }, [50])
 check('合并旧块时台账张数取上一层总数（不按列出的号数重算）', inherited.count === 100, String(inherited.count))
 check('合并后台账行仍写真实张数', inherited.line.includes('100 张图片'), inherited.line)

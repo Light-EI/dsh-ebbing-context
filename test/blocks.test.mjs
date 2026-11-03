@@ -1,6 +1,6 @@
 // 区块划分与锚点解析的断言测试（失败以非零退出码结束）。
 // 跑法：node plugin/test/blocks.test.mjs
-import { canCompressZone, isTurnBoundaryPair, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, turnBounds } from '../lib/blocks.js'
+import { canCompressZone, costOfMessage, isTurnBoundaryPair, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, turnBounds } from '../lib/blocks.js'
 
 let failed = 0
 let total = 0
@@ -517,9 +517,9 @@ const fakeSession = {
 }
 const forged = readZones({ get: () => null }, fakeSession, null, (event, data) => fakeLog.push([event, data]))
 check(
-  '出身对不上的检查点：留在 L1，不升 L3',
-  forged.zones.l1.length === 1 && forged.zones.l3.length === 0 && forged.zones.l1[0].proven === false,
-  JSON.stringify({ l1: forged.zones.l1.length, l3: forged.zones.l3.length, proven: forged.zones.l1[0].proven }),
+  '出身对不上的检查点：不收进 L1，当成原文区里的一段普通内容（设计约束）',
+  forged.zones.l1.length === 0 && forged.zones.l3.length === 0 && forged.zones.l0.some((n) => n.seq === 9000),
+  JSON.stringify({ l0: forged.zones.l0.length, l1: forged.zones.l1.length, l3: forged.zones.l3.length }),
 )
 check('出身对不上会记一条 foreign-block-unproven', fakeLog.some(([event]) => event === 'foreign-block-unproven'), JSON.stringify(fakeLog.map(([e]) => e)))
 // 同一条里只报一次：每个 pre-step 都报一遍会把滚动日志刷满（找茬意见 2）。
@@ -543,8 +543,8 @@ const rw2 = readZones({ get: () => null }, rewriteSession)
 rewriteLog[0] = { type: 'compaction/start', data: { compactionId: 'a' } }
 const rw3 = readZones({ get: () => null }, rewriteSession)
 check(
-  '同长度改写日志后重新核对出身（改掉 → 不认；改回 → 又认）',
-  rw1.zones.l3.length === 1 && rw2.zones.l3.length === 0 && rw2.zones.l1[0].proven === false && rw3.zones.l3.length === 1,
+  '同长度改写日志后重新核对出身（改掉 → 不认、当原文；改回 → 又认成 L3）',
+  rw1.zones.l3.length === 1 && rw2.zones.l3.length === 0 && rw2.zones.l0.some((n) => n.seq === 9000) && rw3.zones.l3.length === 1,
   JSON.stringify({ rw1: rw1.zones.l3.length, rw2: rw2.zones.l3.length, rw3: rw3.zones.l3.length }),
 )
 
@@ -559,9 +559,9 @@ const mixedSession = {
 }
 const mz = readZones({ get: () => null }, mixedSession)
 check(
-  '检查点夹在原文中间时仍是外来块（进 L1，不进 L3）',
-  mz.zones.l1.length === 1 && mz.zones.l3.length === 0,
-  JSON.stringify({ l1: mz.zones.l1.length, l3: mz.zones.l3.length }),
+  '来历不明的检查点夹在原文中间：当成原文（不收 L1、不升 L3），压缩时才不会被两个区间互相卡住',
+  mz.zones.l1.length === 0 && mz.zones.l3.length === 0 && mz.zones.l0.some((n) => n.seq === 9000),
+  JSON.stringify({ l0: mz.zones.l0.length, l1: mz.zones.l1.length, l3: mz.zones.l3.length }),
 )
 
 // 第十四组：标记与已知边界打架时只记 notes、不抛错（设计约束）。
@@ -631,6 +631,37 @@ check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮
   })
   check('空节点算 0：整段才 60 token → 不够 300，不算可压', canCompressZone(mkZones(30), 'l0', 0) === false)
   check('对照：同样的结构换成大段原文 → 可压', canCompressZone(mkZones(400), 'l0', 0) === true)
+}
+
+// 第二十一组：C2 的两条新口径与 C4 的空消息成本。
+{
+  // 真检查点前面还有原文：按原文处理（不进 L3、也不收进 L1），否则 l0/l1 两个区间互相污染。
+  const beforeLog = []
+  const beforeSession = {
+    surface: { nodes: [5, 10, 9000] },
+    log: [{ type: 'compaction/start', data: { compactionId: 'host1' } }],
+    deriveMessages: () => [
+      { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+      { role: 'user', content: [{ type: 'text', text: '早先的问题' }] },
+      { role: 'user', content: [{ type: 'text', text: '宿主压缩摘要' }], source: { kind: 'compact-checkpoint', compactionId: 'host1' } },
+    ],
+  }
+  const beforeZones = readZones({ get: () => null }, beforeSession, null, (e, d) => beforeLog.push([e, d]))
+  check(
+    '真检查点前面还有原文：当成原文、不升 L3（设计约束）',
+    beforeZones.zones.l3.length === 0 && beforeZones.zones.l1.length === 0 && beforeZones.zones.l0.some((n) => n.seq === 9000),
+    JSON.stringify({ l0: beforeZones.zones.l0.length, l1: beforeZones.zones.l1.length, l3: beforeZones.zones.l3.length }),
+  )
+  check('这种情形记一条 foreign-block-as-raw', beforeLog.some(([e]) => e === 'foreign-block-as-raw'), JSON.stringify(beforeLog.map(([e]) => e)))
+  const rawEntry = beforeZones.zones.l0.find((n) => n.seq === 9000)
+  check('当成原文的检查点也带 originSeq（块头 ev 范围才不会丢端点）', !!rawEntry && rawEntry.originSeq === 9000, JSON.stringify(rawEntry))
+
+  // 回归修复 R2：这条"有来历但前面还有内容"的日志要按节点去重，不能每个 pre-step 刷一条。
+  for (let i = 0; i < 3; i += 1) readZones({ get: () => null }, beforeSession, null, (e, d) => beforeLog.push([e, d]))
+  const asRawTimes = beforeLog.filter(([e]) => e === 'foreign-block-as-raw').length
+  check('foreign-block-as-raw 同一个节点只记一次（三个 pre-step 也只一条）', asRawTimes === 1, String(asRawTimes))
+  // C4：空消息按 0 计，不能抛。
+  check('costOfMessage 收到 null 时按 0 计（空节点不该让地图崩）', costOfMessage({}, null) === 0)
 }
 
 if (failed) {

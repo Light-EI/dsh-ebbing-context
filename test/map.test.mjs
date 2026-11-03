@@ -69,7 +69,7 @@ const ckSession = {
   ],
 }
 const ckText = renderMap({ sessions: { get: () => ckSession }, get: (n) => (n === 'sessionProjections' ? { stateOf: () => ({ turns: [] }) } : null) }, agent, config, usage).text
-check('外来块查不到压缩记录时，地图说明出身没核实', /出身没核实/.test(ckText), ckText.slice(0, 600))
+check('来历不明的检查点已按原文处理：地图说明它不是块、会跟着原文一起被压走', /来历不明的压缩摘要/.test(ckText), ckText.slice(0, 700))
 // 压不动时不能再出现「前 N 块」这种半截话：N 该由插件算好，不该让模型猜。
 // 有可压范围就写真实区间（压 L1 区最老的 1–3 块），没有就写「一段」。
 check('可压位置里不出现「前 N 块」这种没算好的占位说法', !/前 N 块/.test(text), text.slice(0, 600))

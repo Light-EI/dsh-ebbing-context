@@ -110,6 +110,18 @@ if (DEFAULTS.title.maxTokens !== 50 || 'lang' in DEFAULTS.title) {
 }
 
 
+
+// 第四轮审查 D1：迁移必须在运行时出口生效。
+// 宿主把 volatile 叶子按默认值预置好（新键永远有值），所以判据只能是“旧键在不在”；
+// 而且 validateConfig 改的是解引用副本，真正生效的是 mergeConfig 每次现读的那份。
+const runtimeMigrated = mergeConfig({ notice: { forgivePct: 70, growthResetPct: DEFAULTS.notice.growthResetPct } })
+if (runtimeMigrated.notice.growthResetPct !== 70 || "forgivePct" in runtimeMigrated.notice) {
+  console.error("FAIL 运行时没把 forgivePct 迁成 growthResetPct：" + JSON.stringify(runtimeMigrated.notice))
+}
+const runtimeRoot = mergeConfig({ notifySubagents: false, notice: {} })
+if (runtimeRoot.notice.notifySubagents !== false || "notifySubagents" in runtimeRoot) {
+  console.error("FAIL 运行时的根级 notifySubagents 没迁进 notice：" + JSON.stringify(runtimeRoot))
+}
 // 老配置项迁移（回归修复）：forgivePct 改名 growthResetPct 之后不许让老 profile 起不来。
 try {
   const migrated = { notice: { forgivePct: 70 } }

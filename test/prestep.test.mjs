@@ -159,7 +159,8 @@ function usageSession(used) {
 
 function usageCtx(session) {
   const ctx = fakeCtx(session)
-  ctx.tools = { register: () => () => {} }
+  // 会话搜索必须装着：提醒现在走同一道闸门（回归修复），没装就不叫醒。
+  ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
   ctx.tokenMeter = { measure: () => ({ totalTokens: session.used }) }
   return ctx
 }
@@ -985,6 +986,45 @@ await check('F1 回归：本轮在表层上还没有节点时，pre-step 不许�
   assert.equal(nextCalled, true, 'pre-step 必须走到 next()')
 })
 
+await check('未闭合压缩事务：pre-step 直接抛红，且一个节点都不写', async () => {
+  const msg = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] }
+  const session = loggedSession([1], [msg], [
+    [1, { type: 'user/message', data: msg }],
+    [2, { type: 'turn/start', data: { turn: 1 } }],
+    [3, { type: 'compaction/start', data: { compactionId: 'c-open', turn: 1 } }],
+  ])
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS })
+  const before = session.appends.length
+  let thrown = null
+  try {
+    await ctx.handlers.get('agent/pre-step')(STEP(2), () => {})
+  } catch (error) {
+    thrown = error
+  }
+  assert.ok(thrown, '必须抛出去，让宿主把它显示成红色错误')
+  assert.match(String(thrown.message), /没有结束的压缩事务/, '要说清是未闭合的压缩事务')
+  assert.match(String(thrown.message), /不要在这条会话里继续发消息/, '要给出停手提示')
+  assert.equal(session.appends.length, before, '这一轮一个节点都不许写（写下去只会更难修）')
+})
+
+await check('未闭合事务但宿主已认领（后面有 session/end-seed）：不报红，照常走', async () => {
+  const msg = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] }
+  const session = loggedSession([1], [msg], [
+    [1, { type: 'user/message', data: msg }],
+    [2, { type: 'turn/start', data: { turn: 1 } }],
+    [3, { type: 'compaction/start', data: { compactionId: 'c-open', turn: 1 } }],
+    [4, { type: 'session/end-seed', data: { inherited: true } }],
+  ])
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS })
+  let nextCalled = false
+  // 宿主自己把这种孤儿认领了（orphanCompactions），我们不该再把它报成故障。
+  await ctx.handlers.get('agent/pre-step')(STEP(2), () => {
+    nextCalled = true
+  })
+  assert.equal(nextCalled, true, '认领过的孤儿不该拦住这一轮')
+})
 await check('S2 回归：同一轮里占用明显掉下来（压缩成功）后，不再拿旧快照报区超限', async () => {
   const session = layeredSession(['L1', 'L1'], 300, 900)
   const ctx = usageCtx(session)
@@ -1172,6 +1212,44 @@ await check('超窗口：静默子代理收尾也会清零，不会把两次隔�
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: new AbortController().signal, agent: sub }, () => {})
   await handler({ agent: sub, turn: 6, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }, () => {})
   assert.equal(disarmed, 0, '中间成功过一轮，下一次超窗仍算"第一次"（静默子代理同样适用）')
+})
+
+await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯也要复位（否则重新启用后到线提醒永久丢）', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, notice: { ...DEFAULTS.notice, growthTokens: 100000 } })
+  const t3 = STEP(3, 1)
+  await ctx.handlers.get('agent/pre-step')(t3, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal })
+  assert.equal(t3.agent.followups.length, 1, '第一次越线要报')
+  // 用户在第二、三轮之间把会话搜索插件关掉，同时占用掉到线下。
+  ctx.tools = { register: () => () => {}, get: () => undefined }
+  session.used = 400
+  session.seq += 1
+  const t4 = STEP(4, 1)
+  await ctx.handlers.get('agent/pre-step')(t4, () => {})
+  assert.equal(t4.agent.followups.length, 0, '没装会话搜索时不许叫醒')
+  // 重新启用，用量再次越线：这一次的到线提醒必须能发出来。
+  ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  session.used = 920
+  session.seq += 1
+  const t5 = STEP(5, 1)
+  await ctx.handlers.get('agent/pre-step')(t5, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
+  assert.equal(t5.agent.followups.length, 1, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
+  assert.match(String(t5.agent.followups[0].content[0].text), /上下文/, '发的应该还是到线提醒')
+})
+await check('没装会话搜索插件：不叫醒（地图与工具都是停用的）', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  // 覆盖掉 usageCtx 给的 get：模拟"宿主没装 dsh-tool-session-query"
+  ctx.tools = { register: () => () => {}, get: () => undefined }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const step = STEP(3)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 0, '没有会话搜索时不该叫醒模型')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
 })
 
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

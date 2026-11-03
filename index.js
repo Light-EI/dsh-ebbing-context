@@ -10,7 +10,7 @@ import { DEFAULTS, NAME, validateConfig, migrateConfig } from './lib/config.js'
 import { renderMap } from './lib/map.js'
 import { estimateTokens } from './lib/tokens.js'
 import { issue, forget } from './lib/license.js'
-import { readZones, zoneOrderFault, worthCompressing } from './lib/blocks.js'
+import { openCompaction, readZones, zoneOrderFault, worthCompressing } from './lib/blocks.js'
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
 import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, FOLD_KIND } from './lib/callfold.js'
@@ -53,7 +53,8 @@ try {
       growthTokens: V(Schema.number().min(0).default(DEFAULTS.notice.growthTokens)),
       // 提醒过一轮、模型选择"这一轮不压"时退回多少增长额度（%）。100 = 全额退回。
       growthResetPct: V(Schema.number().min(0).max(100).default(DEFAULTS.notice.growthResetPct)),
-      // 子代理要不要也参与（默认 false）：它们是我们派出去干活的助手，不是用户在聊的这份对话。
+      // 子代理要不要也参与（默认 true）：它们同样会碰到已压缩的表层，没有轮次标记就看不出
+      // 「这块盖住了哪几轮」；想安静可以在面板关掉。
       notifySubagents: V(Schema.boolean().default(DEFAULTS.notice.notifySubagents)),
     }).default(DEFAULTS.notice),
     reservedTokens: V(Schema.number().min(0).default(DEFAULTS.reservedTokens)),
@@ -80,10 +81,11 @@ function ebbingPrompt(config) {
   return [
     `本机装了分层压缩。占用到 ${pct}%、最近又长了一大截、或某一层超出配额时，插件会在一轮收尾把你叫醒一次，第一条消息就是提醒（带当前地图）。提醒是让你自己判断要不要压：决定压就真的调用 compress（只回一句"我来压缩"不算），不压就说一句为什么、继续干活。`,
     '两个工具：context_map 看当前分层结构和「可压位置」；compress 把最旧的对话折成更短的摘要（填法、级联与上限都写在它的说明与参数里）。',
+    '层级：l0 是原文、最浅；l1 由 l0 压出来，l2 由 l1，l3 最深。压某层时，比它浅且还能压的层必须同批一起给（例：压 l2 就同时给 l1 与 l0）；填表顺序按 l3 → l2 → l1 → l0。',
     '摘要正文由你写进 summary，插件只搬运、不调模型。',
     '形如〔轮次标记〕的那条消息是插件写的轮次分界线，不是用户说的话：它后面紧跟的内容就是它写的那一轮。压缩时写 to 就照它认轮号。',
     '历史里那些〔L1｜T16–T19｜ev 4121–4390〕标题开头的块是压缩结果（括号里是它所在的层、覆盖的轮次、被压掉的事件号范围），是已经成立的事实：直接在它们上面继续做事，不要复述、不要在回复里提它、不要把里面的事重做一遍。',
-    '压掉的原文不会消失（还在会话日志里）：装了「会话搜索」就能按事件编号取回；没装时这两个工具会直接停用（取不回来就不让压）。所以摘要写短没关系，但别每次压完就顺手取回，只有真需要原文时才取。',
+    '压掉的原文不会消失（还在会话日志里），用 session_event_read 按事件号能读回来；这个工具没装时，compress 与 context_map 会直接停用。所以摘要写短没关系，但别每次压完就顺手取回，只有真需要原文时才取。',
     '压缩在表层上不可撤销（原文移出上下文）。',
     '不压的代价：写满之后服务端会直接以超出窗口拒掉整轮请求。',
   ].join('')
@@ -151,6 +153,10 @@ export function apply(ctx, rawConfig = {}) {
     // 按步的用量缓存也清掉：以前只在 compress 出口删自己的键，从不压缩的代理（尤其子代理）
     // 会一直留一条 agentId → 步戳（回归修复）。
     stepStamps.delete(id)
+    // beginUsageStep 在 session.id 与 agentId 不同时还会记第二个键（readUsage 手上只有 session）：
+    // 那个键也要跟着回收，否则每注销一个代理就残留一个短字符串（回归修复）。
+    const goneSession = ctx.sessions.get(id)
+    if (goneSession && typeof goneSession.id === 'string' && goneSession.id !== id) stepStamps.delete(goneSession.id)
     forget(id)
   })
 
@@ -234,9 +240,31 @@ export function apply(ctx, rawConfig = {}) {
     const quiet = isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)
     const badConfig = quiet ? null : fatalConfig(config)
     if (badConfig) throw new Error(badConfig)
+    // 只读检查（用户定下的规矩）：日志里停着没闭合的压缩事务时，**这一轮什么节点都不写**。
+    // 为什么不等 compress 自己拒：宿主在写 turn/start 之后、我们第一次拿到控制权时，
+    // 只要再 append 一个节点（轮次标记、提醒都不行），这条日志就更难修；
+    // 而"打开/恢复会话"本身会先补 turn/end，那一步直接把日志写死（重放报 SessionFormatError）。
+    // 抛到 try 外面 → 宿主把它当红色错误显示，这一轮不发请求。
+    // openCompaction 认的是"end-seed 之前没闭合"的孤儿；被宿主认领过（后面有 end-seed）的返回 null，
+    // 那种情况不会误报——见 blocks.js 的注释。
+    if (!quiet) {
+      const stuckSession = ctx.sessions.get(payload.agent.id)
+      const stuck = stuckSession ? openCompaction(stuckSession) : null
+      if (stuck) {
+        log('pre-step-open-compaction', { seq: stuck.seq, compactionId: stuck.compactionId })
+        throw new Error(
+          '发现日志里有一个没有结束的压缩事务（compaction/start 缺 compaction/end，' +
+            'compactionId=' + (stuck.compactionId || '（没有写 id）') + '，事件号 ' + stuck.seq + '）。' +
+            '这一轮不会写任何东西、也不会发请求：再往这条会话里写节点会让它的日志彻底打不开。' +
+            '先完全退出 DSH，备份会话日志，再补一条配对的 compaction/end（同一个 compactionId、同一个 turn，带 error）' +
+            '或从那条 compaction/start 之后截断；确认能正常加载之后再回来继续对话。' +
+            '（界面里还能看到历史消息，是因为宿主在重启前不会重放校验——不要在这条会话里继续发消息。）',
+        )
+      }
+    }
     // 每一步只扫一次表层：三个用途共用这一份（判大纲损坏 / 区超限 / 哪几层压得动）。
     // 以前这三处各扫一遍，长会话每轮要做上百万次比较（设计约束）。
-    beginUsageStep(payload.agent.id, payload.turn, payload.step)
+    beginUsageStep(payload.agent.id, payload.turn, payload.step, ctx.sessions.get(payload.agent.id))
     let stepZones = null
     try {
       const stepSession = ctx.sessions.get(payload.agent.id)
@@ -555,6 +583,18 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 这次"掉下去又越上来"就永远不报了（回归修复）。
   const aboveLine = usage.ratio >= config.triggerPct
   if (!aboveLine) st.lineOn = false
+  // 会话搜索没开时 compress 与 context_map 都停用：叫醒只会让模型照地图撞墙（回归修复）。
+  // 闸门必须放在上面两行**之后**：整个"停用 → 启用"期间占用掉到线下时，指示灯也得复位，
+  // 否则重新启用后再次越线会被当成"还亮着"，那一次到线提醒永久丢掉（回归修复）。
+  // 早退时顺手把这一步之前登记的提醒作废：工具都停着，叫醒它只会吃一次拒绝。
+  if (missingSessionQuery(ctx, config)) {
+    if (!st.loggedSearchBlock && typeof log === 'function') {
+      st.loggedSearchBlock = true
+      log('remind-skip-no-session-search', { agent: id })
+    }
+    forgetPending(bySignal, byAgent, id, payload.signal)
+    return
+  }
   // 这一轮本来就是被叫醒的那一轮：不再登记第二条。刚说过的话不必再说一遍，
   // 等用户真开口之后的下一轮再判（否则"读了提醒没压"会立刻又收到一条同样的提醒）。
   if (st.autoTurn === turn) {
@@ -1190,7 +1230,10 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
           result = { ok: false, reason: '压缩时出错了：' + errText(error) }
         }
       if (!result.ok) {
-        log('compress-rejected', { reason: result.reason, keys: Object.keys(args || {}) })
+        log('compress-rejected', { reason: result.reason, applied: result.applied === true, keys: Object.keys(args || {}) })
+        // 回执说"失败"但块其实已经落地（end 补不上那一路）：基线要照常重设，
+        // 否则增长触发会把这一批当成"没发生"，下一轮立刻又报增长。
+        if (result.applied === true) resetGrowthBaseline(ctx, agent, config, reminded)
         // 多键批里可能"前面的层已经写进去、后面的失败了"：把落盘的层说清楚，
         // 否则模型会整批重发，把已写的层再压一遍。fail() 给的是 partial，不是 results。
         const landed = Array.isArray(result.partial) && result.partial.length
@@ -1435,8 +1478,12 @@ export function readUsage(ctx, session, config) {
 }
 
 // 每次 pre-step 开头调用：换一个"步戳"。同一步内的重复读命中缓存，跨步、跨代理各自独立。
-function beginUsageStep(agentId, turn, step) {
-  stepStamps.set(agentId, `${turn}:${step}`)
+function beginUsageStep(agentId, turn, step, session) {
+  const stamp = `${turn}:${step}`
+  stepStamps.set(agentId, stamp)
+  // readUsage 手上只有 session，没有 agentId：两个键都记一份，否则它永远查不到步戳、
+  // 每步都退化成"没缓存"（不是错，只是白扫一遍表层，长会话里很贵）。
+  if (session && typeof session.id === 'string' && session.id !== agentId) stepStamps.set(session.id, stamp)
 }
 
 function computeUsage(ctx, session, config) {
@@ -1503,13 +1550,18 @@ function makeLiveConfig(raw) {
 
 // 导出给测试：keepTurns 的取整必须落在运行时出口，这一层只有真读一次才看得见。
 export function mergeConfig(raw) {
+  const copy = raw && typeof raw === "object" ? { ...raw } : {}
+  if (copy.notice && typeof copy.notice === "object" && !Array.isArray(copy.notice)) copy.notice = { ...copy.notice }
+  const source = migrateConfig(copy)
+  // 迁移必须发生在**运行时这条路**上（第四轮审查 D1）：validateConfig 拿到的是一份解引用副本，
+  // 在副本上删旧键、填新键不会回流到宿主那份 raw；真正生效的是 mergeConfig 每次现读的这份。
   const merged = {
     ...DEFAULTS,
-    ...raw,
-    budget: { ...DEFAULTS.budget, ...(raw.budget || {}) },
-    segment: { ...DEFAULTS.segment, ...(raw.segment || {}) },
-    notice: { ...DEFAULTS.notice, ...(raw.notice || {}) },
-    title: { ...DEFAULTS.title, ...(raw.title || {}) },
+    ...source,
+    budget: { ...DEFAULTS.budget, ...(source.budget || {}) },
+    segment: { ...DEFAULTS.segment, ...(source.segment || {}) },
+    notice: { ...DEFAULTS.notice, ...(source.notice || {}) },
+    title: { ...DEFAULTS.title, ...(source.title || {}) },
   }
   // 取整必须落在**运行时出口**（回归修复）：`validateConfig` 收到的是 `unwrapVolatile`
   // 造出来的副本，改那个副本不会回流到 raw；而地图与判轮读的是这里，所以在这里取整。
