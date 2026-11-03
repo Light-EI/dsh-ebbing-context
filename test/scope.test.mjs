@@ -10,7 +10,7 @@
 //
 // 扫的是我们自己写的 index.js，词法处理只覆盖这个文件真实用到的写法，
 // 宁可漏报也不误报：字符串/注释/模板里的内容一律当文本跳过。
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -219,6 +219,50 @@ check('模块级函数不引用 apply() 的局部变量', offenders.length === 0
 // 顺带钉住这次的具体 bug：resetGrowthBaseline 的第四个参数必须是本函数自己的入参。
 const compressFn = fns.find((f) => f.name === 'compressTool')
 check('compressTool 接收了 reminded（而不是去闭包里找）', !!compressFn && compressFn.params.has('reminded'), compressFn ? [...compressFn.params].join(',') : 'missing')
+
+// ---- 第二类作用域错：lib/*.js 里"用了 log 却没接收它" ----
+// 0.1.16/0.1.17 的 `commitOne` 就是这样：为把日志传给图片计价，机械地在函数体里写了 `log`，
+// 却没有给它加形参 —— 于是**每一次压缩**都在第一层就抛 ReferenceError，压缩功能整体失效。
+// 这个错了两个版本都没人发现，因为 `compress.test.mjs` 只 import 了三个纯函数，
+// 从来没有真正调用过 `runCompress`。静态扫描比"再补一条端到端用例"更快落地，先兜住这一类。
+const libOffenders = []
+{
+  let libNames = []
+  try {
+    libNames = readdirSync(join(here, '..', 'lib')).filter((n) => n.endsWith('.js'))
+  } catch {
+    libNames = []
+  }
+  for (const name of libNames) {
+    const text = strip(readFileSync(join(here, '..', 'lib', name), 'utf8'))
+    // 文件级已经声明了 log（模块级 const log = …）就不用逐函数看。
+    if (/^(?:const|let|var)\s+log\b/m.test(text)) continue
+    for (const fn of moduleFunctions(text)) {
+      if (fn.params.has('log') || fn.locals.has('log')) continue
+      if (/(?<![.\w$])log\b/.test(fn.body)) libOffenders.push(`${name}: ${fn.name} 用了 log 但没接收它`)
+    }
+  }
+}
+check('lib/ 里的函数用 log 之前必须接收它', libOffenders.length === 0, libOffenders.join('；'))
+
+// 自检：造一个和 commitOne 同形的坏函数，确认扫描真的会报。
+{
+  const sample = [
+    'function commitOne(ctx, session, zones, dry = false) {',
+    '  const live = readZones(ctx, session, log)',
+    '  return live',
+    '}',
+    'function rangeImageTokens(ctx, zones, log) {',
+    '  return log ? 1 : 0',
+    '}',
+  ].join('\n')
+  const hits = []
+  for (const fn of moduleFunctions(strip(sample))) {
+    if (fn.params.has('log') || fn.locals.has('log')) continue
+    if (/(?<![.\w$])log\b/.test(fn.body)) hits.push(fn.name)
+  }
+  check('自检：没接收 log 却用了它的函数会被逮到', hits.includes('commitOne') && !hits.includes('rangeImageTokens'), hits.join(','))
+}
 
 if (failed) {
   console.error(`\n${failed} 项失败`)

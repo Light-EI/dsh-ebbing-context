@@ -608,6 +608,31 @@ check('`T?+` 解析成"轮号未知"，不会被误读成某个具体轮', (() =
 })())
 check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮号）', canCompressZone(uz, 'l3') === true)
 
+// 第十九组：日志里有没有没闭合的压缩事务（写前预检，避免再写第二个 start）。
+{
+  const { openCompaction } = await import('../lib/blocks.js')
+  const mk = (types) => ({ log: types.map((t, i) => ({ seq: i, type: t, data: { compactionId: 'c1' } })) })
+  check('openCompaction：start 后面有 end → 不算开着', openCompaction(mk(['compaction/start', 'compaction/summary', 'compaction/end'])) === null)
+  const stuck = openCompaction(mk(['turn/start', 'compaction/start', 'compaction/summary']))
+  check('openCompaction：只有 start 没有 end → 认为开着', stuck && stuck.compactionId === 'c1' && stuck.seq === 1)
+  check('openCompaction：被 session/end-seed 认领成孤儿 → 不算开着', openCompaction(mk(['compaction/start', 'session/end-seed'])) === null)
+  check('openCompaction：没有日志 → null', openCompaction({}) === null && openCompaction(null) === null)
+}
+
+// 第二十组：含空节点的原文区，成本要按"空节点 = 0"算，不能整段算成量不出来。
+// 否则 canCompressZone 永远说可压、绕过 300 token 闸门，而 compress 一比就永久拒（疑点 a 的真形态）。
+{
+  const mkZones = (chars) => ({
+    currentTurn: 4,
+    outlineFault: null,
+    zones: { l0: [{ seq: 1, turn: 1 }, { seq: 2, turn: 1 }, { seq: 3, turn: 2 }], l1: [], l2: [], l3: [] },
+    messageFor: (seq) => (seq === 2 ? null : { role: 'user', content: [{ type: 'text', text: '字'.repeat(chars) }] }),
+    imagePricer: null,
+  })
+  check('空节点算 0：整段才 60 token → 不够 300，不算可压', canCompressZone(mkZones(30), 'l0', 0) === false)
+  check('对照：同样的结构换成大段原文 → 可压', canCompressZone(mkZones(400), 'l0', 0) === true)
+}
+
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
