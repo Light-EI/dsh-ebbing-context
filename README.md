@@ -52,6 +52,10 @@ dsh plugin add ./dsh-ebbing-context
 
 装完确认三件事：插件卡片显示**运行中**、`context_map` / `compress` 两个工具都在、`/context-status` 能出地图。
 
+**卸载**（`dsh plugin remove dsh-ebbing-context` 之后还要做两步）：
+
+1. 打开 profile 的 `cordis.patch.yml`，删掉 `dsh-ebbing-context` 那一节（包括面板里改过的 `config`）。不删的话，下一次启动会因为"patch 指向的条目不存在"在 stderr 刷一条警告——不会坏，但会一直刷。
+2. 日志在 `$DSH_HOME/logs/ebbing-context.log`（滚动时还有 `.1` / `.2`），卸载不会自动删，确认不需要排查后手动删掉即可。
 **建议关掉宿主自带的自动压缩**（`compaction-basic` 的 `auto`，默认 80% 触发）。它一旦触发会把多层摘要重新拍平，细节永久丢失。插件照样能压，只是效果打折。关的位置取决于你的安装方式与预设。
 
 ---
