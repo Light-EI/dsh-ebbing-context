@@ -3,7 +3,7 @@
 // 只有真跑一遍才会现形（ee1fb7e 就是这么漏过去的）。
 // 跑法：node plugin/test/prestep.test.mjs
 import assert from 'node:assert/strict'
-import { apply, foldPending } from '../index.js'
+import { apply, describeResults, foldPending } from '../index.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
 
@@ -34,7 +34,9 @@ function fakeSession(nodes, messages) {
         nodes.splice(start, removed, seq++)
         messages.splice(start, removed, { role: 'user', content: data.content, source: data.source })
       }
-      return seq - 1
+      // 真实宿主的 append 返回**事件对象**（带 seq），不是数字：假桩返回数字会掩盖 sourceEventSeqs 之类的假设。
+      const out = seq - 1
+      return { type, seq: out, data, time: Date.now() }
     },
   }
   return session
@@ -85,6 +87,19 @@ function fakeCtx(session) {
     },
   }
 }
+
+await check('/context-status 第一行报告表层读到什么（正向信号）', async () => {
+  const session = blockSession(2, 100)
+  const ctx = fakeCtx(session)
+  ctx.session = session
+  ctx.tools = { register: () => () => {} }
+  apply(ctx, { ...DEFAULTS })
+  const cmd = ctx.commands[0]
+  const res = cmd.handler({ agent: { id: 'a1' } })
+  assert.equal(res.kind, 'success')
+  assert.match(res.text.split('\n')[0], /^表层读取：正常（2 个节点 \/ 2 条消息）$/)
+  assert.ok(res.text.includes('L1'), '地图正文仍要跟着出现')
+})
 
 await check('apply() 能挂上：两个工具 + 一条命令', async () => {
   const registered = []
@@ -732,7 +747,9 @@ await check('区超限：浅层为空时深层也不报（这种表层本身不�
 })
 
 await check('增长触发没东西可压：门槛砍到一半、基线前移，压得动时按半个门槛再报', async () => {
-  const session = layeredSession(['L1'], 20, 500)
+  const session = layeredSession(['L1'], 200, 500)
+  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
   const t1 = STEP(1)
@@ -779,7 +796,9 @@ await check('增长触发没东西可压：门槛砍到一半、基线前移，�
 })
 
 await check('增长到量一直压不动：每次只等半个门槛，跨轮继续（不会一次就饿死）', async () => {
-  const session = layeredSession(['L1'], 20, 500)
+  const session = layeredSession(['L1'], 200, 500)
+  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
   const t1 = STEP(1)
@@ -819,7 +838,9 @@ await check('增长到量一直压不动：每次只等半个门槛，跨轮继�
 })
 
 await check('本轮决定不压：growthResetPct = 100 时门槛回原额，重新攒满才再报', async () => {
-  const session = layeredSession(['L1', 'L1'], 20, 500)
+  const session = layeredSession(['L1', 'L1'], 200, 500)
+  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, growthResetPct: 100 } })
   const t1 = STEP(1)
@@ -849,7 +870,9 @@ await check('本轮决定不压：growthResetPct = 100 时门槛回原额，重�
 })
 
 await check('本轮决定不压：growthResetPct = 0 时门槛重设到 1 token，下一轮接着报', async () => {
-  const session = layeredSession(['L1', 'L1'], 20, 500)
+  const session = layeredSession(['L1', 'L1'], 200, 500)
+  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, growthResetPct: 0 } })
   const t1 = STEP(1)
@@ -1112,9 +1135,10 @@ await check('标记重载去重：上一轮收尾写好的「下一轮 T3」还�
 
 // —— 用户要求：配置硬错误 + 每步只扫一次表层 ────────────────────
 
-await check('keepTurns 配成 0：pre-step 直接打红（不许悄悄按 2 跑，也不许压掉正在进行的轮）', async () => {
+await check('keepTurns 配成 0：配置层兜底取 1，pre-step 不再报红停轮', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
+  // 用户 2026-11-05 定：面板拦正常输入，插件侧兜底取 1——不再每轮抛红把对话打死。
   apply(ctx, { ...DEFAULTS, keepTurns: 0 })
   let threw = null
   try {
@@ -1122,9 +1146,7 @@ await check('keepTurns 配成 0：pre-step 直接打红（不许悄悄按 2 跑�
   } catch (error) {
     threw = error
   }
-  assert.ok(threw, '必须抛给宿主，让 UI 出红字')
-  assert.match(String(threw.message), /keepTurns/)
-  assert.match(String(threw.message), /已停用这次对话/)
+  assert.equal(threw, null, 'keepTurns 0 由配置层取 1，不该再抛给宿主')
 })
 
 await check('每步只扫一遍表层（三个用途共用同一份，不再各扫一遍）', async () => {
@@ -1250,6 +1272,76 @@ await check('没装会话搜索插件：不叫醒（地图与工具都是停用�
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
   assert.equal(step.agent.followups.length, 0, '没有会话搜索时不该叫醒模型')
   assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
+})
+
+await check('读不到表层：pre-step 直接报红（工作对象坏了，不许装作可压）', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
+  Object.defineProperty(session, 'surface', {
+    configurable: true,
+    get() {
+      throw new Error('surface boom')
+    },
+  })
+  const t3 = STEP(3, 1)
+  // 用户 2026-11-05 改判：表层读不出来**不再停对话**——旧做法在用户消息已被 claim 之后抛错，
+  // 持续故障时每轮都会吞掉一条用户消息。现在是降级：本轮不叫醒、四级判据全 false、留一条可见说明，
+  // 工具调用仍照常把硬错回给模型。
+  let threw = null
+  try {
+    await ctx.handlers.get('agent/pre-step')(t3, () => {})
+  } catch (error) {
+    threw = error
+  }
+  assert.equal(threw, null, '不该再抛给宿主')
+  assert.deepEqual(ctx.state ? ctx.state.get('a1').compressible : { l0: false, l1: false, l2: false, l3: false }, { l0: false, l1: false, l2: false, l3: false })
+  // 说明是"尽力而为"：本次 fixture 连 surface 都读不出来，写不进任何节点——这正是
+  // "表层坏了就连提醒都贴不上去"的真实约束。真正能保证的是"不吞消息、不装作可压"。
+  // 能写的时候（例如只是 deriveMessages 坏）会贴一条，见下一条用例。
+  session.seq += 1
+  let threwAgain = null
+  try {
+    await ctx.handlers.get('agent/pre-step')(STEP(4, 1), () => {})
+  } catch (error) {
+    threwAgain = error
+  }
+  assert.equal(threwAgain, null, '第二轮也不许抛（持续故障不能每轮吞消息）')
+})
+
+await check('回执单位：原文区数「条消息」、区块数「个块」（改坏了测试要红）', async () => {
+  const lines = describeResults([
+    { key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 },
+    { key: 'l1', title: 'B', shadowedCount: 3, savedTokens: 90 },
+  ])
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
+  assert.match(lines[1], /l1 成功：B（3 个块 -> 省 90 token）/)
+})
+
+await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按事件号能查回来」', async () => {
+  const session = usageSession(120)
+  const ctx = usageCtx(session)
+  const captured = []
+  ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
+  apply(ctx, { ...DEFAULTS, requireSessionQuery: false })
+  const text = captured.join('')
+  assert.match(text, /若装了会话搜索/, '要说清能不能查回来取决于装没装，不能无条件承诺')
+  assert.doesNotMatch(text, /按事件号能查回来。/, '不能把一定查得回来说死')
+  assert.doesNotMatch(text, /compress 与 context_map 会直接停用/, '开关关掉时不会停用，别这么说')
+})
+
+await check('B3 对照：默认开着时仍然明确点名 session_event_read 并说明停用规则', async () => {
+  const session = usageSession(120)
+  const ctx = usageCtx(session)
+  const captured = []
+  ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
+  apply(ctx, { ...DEFAULTS })
+  const text = captured.join('')
+  assert.match(text, /session_event_read/, '默认情况下要告诉模型用哪个工具取回')
+  assert.match(text, /会直接停用/, '没装会话搜索时会停用，这句要保留')
+  assert.doesNotMatch(text, /填表顺序按/, 'F3：填表顺序只在 compress 的说明里写一份，系统提示不再重复')
+  assert.doesNotMatch(text, /必须同批一起给/, 'F3：级联规矩也只在说明里写一份')
 })
 
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

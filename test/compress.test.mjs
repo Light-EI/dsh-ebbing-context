@@ -98,7 +98,7 @@ check('拿不到逐节点消息时不算图片（不报错、不写行）', noMa
 
 // 上一层只列前 6 个事件号，但"张数"必须是真数：合并时按它写的总数接手，
 // 而不是按它列出来的几个号重算（回归修复：100 张会被缩成 6 张）。
-const bigLedger = '〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要时用 session_event_read 按事件号读。〕'
+const bigLedger = '〔L2｜T1–T2｜ev 1–26〕旧块\n\n〔这块压掉了 100 张图片（事件号 21、22、23、24、25、26 等）。需要时用 session_event_read 按事件号读。〕'
 const inherited = imageLedger({ messageFor: (seq) => (seq === 50 ? { content: [{ type: 'text', text: bigLedger }] } : null) }, [50])
 check('合并旧块时台账张数取上一层总数（不按列出的号数重算）', inherited.count === 100, String(inherited.count))
 check('合并后台账行仍写真实张数', inherited.line.includes('100 张图片'), inherited.line)
@@ -116,5 +116,11 @@ const gapZones = { zones: { l0: [{ seq: 1, turn: 16 }, { seq: 2, turn: 18 }] } }
 const bGap = boundaryLine('l0', 'T17', gapZones)
 check('交界行跳过空轮：T18 才有原文时写 T18 而不是 T18 之外的号', bGap.includes('T18'), bGap)
 
-console.log(failed === 0 ? `\ncompress 断言测试全部通过（${total} 项）` : `\ncompress 断言测试失败 ${failed} / ${total}`)
+// 回归修复：普通消息正文里引用"这块压掉了 3 张图片（事件号 5、6、7）"
+// 不是我们写的台账——它没有块头，认了会产出互斥的两个事件号区间。
+const proseLedger = imageLedger({ messageFor: (seq) => (seq === 60 ? { content: [{ type: 'text', text: '笔记：〔这块压掉了 3 张图片（事件号 5、6、7）〕' }] } : null) }, [60])
+check('正文里引用的台账句不算（没有块头就不接手）', proseLedger.count === 0 && proseLedger.line === '', JSON.stringify(proseLedger))
+
 if (failed !== 0) process.exitCode = 1
+
+console.log(failed === 0 ? `\ncompress 断言测试全部通过（${total} 项）` : `\ncompress 断言测试失败 ${failed} / ${total}`)

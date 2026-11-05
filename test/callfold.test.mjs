@@ -354,4 +354,21 @@ check('末节点正是这次调用的助手消息：callNodeOf 返回该节点',
   assert.equal(callNodeOf(session, 'c1'), 1)
 })
 
+// 回归修复：调用与返回之间夹了别的节点时，[callAt..resultAt] 会吞掉夹层。
+{
+  const s = preciseSession([10, 20, 30], {
+    10: callEvent([['compress', 'c9']]),
+    20: textEvent('夹在中间的一条'),
+    30: resultEvent('c9', 'l0 成功：甲（3 条 -> 省 400 token）'),
+  })
+  const queue = new Map()
+  rememberFold(queue, 'c9', ['l0 成功：甲（3 条 -> 省 400 token）'])
+  const out = foldCallRecordEx(s, queue, {})
+  check('中间夹了别的节点 → 不折（not-adjacent），一个字节都不动', () => {
+    if (out.note !== null) throw new Error('不该产出短注')
+    if (out.reason !== 'not-adjacent') throw new Error('原因应为 not-adjacent，实为 ' + out.reason)
+    if (s.appends.length !== 0) throw new Error('不该写任何节点')
+  })
+}
+
 console.log(`callfold 断言测试全部通过（${passed} 项）`)

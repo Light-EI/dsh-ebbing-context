@@ -14,7 +14,7 @@ import { openCompaction, readZones, zoneOrderFault, worthCompressing } from './l
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
 import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, FOLD_KIND } from './lib/callfold.js'
-import { makeLogger } from './lib/log.js'
+import { makeLogger, logStatus } from './lib/log.js'
 
 export const name = NAME
 // 宿主会按这份表决定"服务没就绪就不加载插件"。`sessionProjections` 只是性能退路
@@ -81,11 +81,12 @@ function ebbingPrompt(config) {
   return [
     `本机装了分层压缩。占用到 ${pct}%、最近又长了一大截、或某一层超出配额时，插件会在一轮收尾把你叫醒一次，第一条消息就是提醒（带当前地图）。提醒是让你自己判断要不要压：决定压就真的调用 compress（只回一句"我来压缩"不算），不压就说一句为什么、继续干活。`,
     '两个工具：context_map 看当前分层结构和「可压位置」；compress 把最旧的对话折成更短的摘要（填法、级联与上限都写在它的说明与参数里）。',
-    '层级：l0 是原文、最浅；l1 由 l0 压出来，l2 由 l1，l3 最深。压某层时，比它浅且还能压的层必须同批一起给（例：压 l2 就同时给 l1 与 l0）；填表顺序按 l3 → l2 → l1 → l0。',
     '摘要正文由你写进 summary，插件只搬运、不调模型。',
     '形如〔轮次标记〕的那条消息是插件写的轮次分界线，不是用户说的话：它后面紧跟的内容就是它写的那一轮。压缩时写 to 就照它认轮号。',
-    '历史里那些〔L1｜T16–T19｜ev 4121–4390〕标题开头的块是压缩结果（括号里是它所在的层、覆盖的轮次、被压掉的事件号范围），是已经成立的事实：直接在它们上面继续做事，不要复述、不要在回复里提它、不要把里面的事重做一遍。',
-    '压掉的原文不会消失（还在会话日志里），用 session_event_read 按事件号能读回来；这个工具没装时，compress 与 context_map 会直接停用。所以摘要写短没关系，但别每次压完就顺手取回，只有真需要原文时才取。',
+    '历史里那些形如〔L1｜T16–T19｜ev 4121–4390〕标题开头的块是压缩结果（这只是格式示例，真实轮次与事件号以地图和块本身为准；括号里是它所在的层、覆盖的轮次、被压掉的事件号范围），是已经成立的事实：直接在它们上面继续做事，不要复述、不要在回复里提它、不要把里面的事重做一遍。',
+    config.requireSessionQuery === false
+      ? '压掉的原文不会消失（还在会话日志里）。这台机器若装了会话搜索，按事件号能查回来；没装的话原文只在日志文件里。所以摘要写短没关系，但别每次压完就顺手取回，只有真需要原文时才取。'
+      : '压掉的原文不会消失（还在会话日志里），用 session_event_read 按事件号能读回来；这个工具没装时，compress 与 context_map 会直接停用。所以摘要写短没关系，但别每次压完就顺手取回，只有真需要原文时才取。',
     '压缩在表层上不可撤销（原文移出上下文）。',
     '不压的代价：写满之后服务端会直接以超出窗口拒掉整轮请求。',
   ].join('')
@@ -112,6 +113,15 @@ const OUR_KINDS = new Set([NOTICE_KIND, MARKER_KIND, FOLD_KIND])
 // 也不会把它的文字当成"用户开口了"。
 const OWN_SENTINEL = '〔Ebbing Context 插件注入〕'
 
+// 成功回执的每一行：单位按层分（原文区数“条消息”，区块数“个块”）。
+// 抽成导出函数是为了能被测试直接钉住——第六轮审查 A/B 都指出这几行没人守，
+// 改坏了（退回“N 条”双单位）测试照样全绿。
+export function describeResults(results) {
+  return (Array.isArray(results) ? results : []).map(
+    (r) => `${r.key} 成功：${r.title}（${r.key === 'l0' ? r.shadowedCount + ' 条消息' : r.shadowedCount + ' 个块'} -> 省 ${r.savedTokens} token）`,
+  )
+}
+
 export function apply(ctx, rawConfig = {}) {
   // 老配置项先迁移（forgivePct → growthResetPct、根层的 notifySubagents 挪进 notice）：
   // 宿主保存配置后不会重新 apply，但启动时会，所以这里改一次就够；运行时那层读的也是同一个对象。
@@ -126,6 +136,9 @@ export function apply(ctx, rawConfig = {}) {
   // **不会重新 apply**，所以启动时的快照会在改完参数后一直生效。这里改成每次读都解引用。
   const config = makeLiveConfig(rawConfig)
   const log = makeLogger('ebbing-context')
+  // 静默夹取也要留痕：keepTurns 被夹过（0 → 1、999 → 50）时记一次日志，
+  // 用户改完面板能在日志里看到实际生效的值（维护手册 §配置的承诺）。
+  const keepTurnsLogged = { done: false }
   const reminded = new Map() // agentId -> { turn, count }：每轮最多一条，count 用来在第二次起换说法
   // 待发的提醒：命中之后每一步都覆盖一次（最后一步的读数最接近收尾那一刻），
   // 收尾时按「同一个 AbortSignal」把它认回来——turn-stopping 的载荷形状是 { turn, signal }，
@@ -193,7 +206,35 @@ export function apply(ctx, rawConfig = {}) {
             const mapSession = ctx.sessions.get(invocation.agent.id)
         const mapUsage = mapSession ? readUsage(ctx, mapSession, config) : null
         const rendered = renderMap(ctx, invocation.agent, config, mapUsage)
-        const text = rendered.text
+        // 正向信号：用户 2026-11-05 问「怎么知道读表层成功了」。读失败有错误回执，
+        // 成功却什么都不说，于是补一行"读到什么"——数字对不上时也能一眼看出。
+        const surfaceLine = (() => {
+          try {
+            const n = mapSession && mapSession.surface && Array.isArray(mapSession.surface.nodes)
+              ? mapSession.surface.nodes.length
+              : null
+            const m = mapSession && typeof mapSession.deriveMessages === 'function'
+              ? mapSession.deriveMessages().length
+              : null
+            if (n === null || m === null) return '表层读取：正常（节点数读不出，但地图已算出来）'
+            return `表层读取：正常（${n} 个节点 / ${m} 条消息）`
+          } catch (error) {
+            return '表层读取：正常（但节点/消息数读不出：' + String((error && error.message) || error) + '）'
+          }
+        })()
+        // 日志写没写出来也必须可见：以前建目录失败会永久关闭，出问题时连痕迹都没有。
+        const logLine = (() => {
+          try {
+            const st = logStatus()
+            if (!st.writable) return '运行日志：不可写（建不了目录，也退不到临时目录）'
+            return st.origin === 'temp'
+              ? `运行日志：${st.path}（DSH_HOME 下建不了，已退到临时目录）`
+              : `运行日志：${st.path}`
+          } catch (error) {
+            return '运行日志：状态读不出（' + String((error && error.message) || error) + '）'
+          }
+        })()
+        const text = surfaceLine + '\n' + logLine + '\n\n' + rendered.text
         // 标记被跳过不是故障（§3.4 的两道护栏）：只在人手看的状态里提一句，
         // 免得排查"地图轮号和上下文里的标记对不上"时无从下手。
         const notes = rendered.zones && rendered.zones.markerNotes
@@ -225,6 +266,14 @@ export function apply(ctx, rawConfig = {}) {
   // 不做任何机械措施——不自动压、不重试、不催 /compact。
   // 顺序要紧：先判定、收尾再投递（见 flushNotice），投递只在 turn-stopping 做。
   ctx.on('agent/pre-step', async (payload, next) => {
+    if (!keepTurnsLogged.done) {
+      keepTurnsLogged.done = true
+      const rawKeep = rawConfig ? unwrapVolatile(rawConfig).keepTurns : undefined
+      if (typeof rawKeep === 'number' && rawKeep !== config.keepTurns) {
+        log('config-clamped', { agent: payload && payload.agent && payload.agent.id, from: rawKeep, to: config.keepTurns })
+      }
+    }
+
     // 宿主不在 waterfall 外层兜异常：抛出去会被 kick() 的 catch 静默吞掉，整轮不再发请求、
     // 用户也看不到原因（cordis events.ts waterfall 无 try/catch → agent-loop:1010 throwError）。
     // 所以这里自己兜住——任何一步失败只放弃本次动作，绝不阻断这一轮。
@@ -238,8 +287,6 @@ export function apply(ctx, rawConfig = {}) {
     // （ref/upstream/installed/agent.index.js:623-625）。默认不打扰子代理——
     // 给它们叫醒、写轮次标记、把配置错误报成红字都没有意义，还会打断它们自己的节奏。
     const quiet = isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)
-    const badConfig = quiet ? null : fatalConfig(config)
-    if (badConfig) throw new Error(badConfig)
     // 只读检查（用户定下的规矩）：日志里停着没闭合的压缩事务时，**这一轮什么节点都不写**。
     // 为什么不等 compress 自己拒：宿主在写 turn/start 之后、我们第一次拿到控制权时，
     // 只要再 append 一个节点（轮次标记、提醒都不行），这条日志就更难修；
@@ -269,8 +316,12 @@ export function apply(ctx, rawConfig = {}) {
     try {
       const stepSession = ctx.sessions.get(payload.agent.id)
       if (stepSession) stepZones = readZones(ctx, stepSession, payload.agent, log)
-    } catch {}
-    const broken = quiet ? null : fatalOutline(ctx, payload, stepZones)
+    } catch (error) {
+      // 读不到表层就退化成"这一步没有区快照"：后面的提醒会少一张地图。
+      // 以前这里是一个空 catch，日志里一个字都没有，出了问题查不到（第六轮审查 B）。
+      if (typeof log === 'function') log('read-zones-failed', { error: errText(error) })
+    }
+    const broken = quiet ? null : fatalOutline(ctx, payload, stepZones, log)
     if (broken) throw new Error(broken)
     try {
       // 先收上一次 compress 的调用记录：这一步仍在同一个 turn 内，且在下一次请求之前，
@@ -291,6 +342,8 @@ export function apply(ctx, rawConfig = {}) {
       // 正常情况下上一轮收尾已经写好「下一轮 T{N}」；没写（异常收场、会话开头、老历史）这里补。
       if (!quiet) ensureTurnMarker(ctx, reminded, payload, log)
     } catch (error) {
+      // 任何失败都只放弃本次动作，不打断这一轮：插件没有"值得让宿主报红"的错误——
+      // 报红发生在用户消息被 claim 之后，等于吞掉用户的话。
       log('pre-step', { agent: payload.agent && payload.agent.id, error: String((error && error.message) || error) })
     }
     return next()
@@ -366,7 +419,7 @@ export function apply(ctx, rawConfig = {}) {
               '〔Ebbing Context 超窗提示 · 插件注入，不是用户说的话〕\n' + OWN_SENTINEL + '\n' +
               '上下文超出窗口，这一轮被服务端拒掉了。宿主自带的压缩如果开着，它可能自己救一次、' +
               '然后这一轮照常继续——如果下一轮恢复正常，请忽略这句话。' +
-              '要是连着两轮都被服务端拒掉，我会再报一次，那时才真的压不动。')
+              '要是连着两轮都被服务端拒掉，我会再报一次，那时才真的压不动。', log)
           } catch (error) {
             log('request-error', { agent: id, error: String((error && error.message) || error) })
           }
@@ -384,7 +437,8 @@ export function apply(ctx, rawConfig = {}) {
               '连着两轮都超出窗口，停在这里、不会自动重试；自动续作也已经停掉。' +
               '现在每次请求都还会超窗口，compress 要依附在一次成功的请求上才调得动，所以插件此刻压不动。' +
               '建议把 maxTokens 调小，或者换一个窗口更大的模型，然后发一句话继续。' +
-              '如果这两条都做不到，要不要用宿主自带的压缩（它会把分层拍平、原文再也取不回）由你决定——插件不替你选。')
+              '如果这两条都做不到，要不要用宿主自带的压缩由你决定——它会把分层拍平（表层上只剩它写的那段摘要，我们的块不再出现），' +
+              '原文事件仍在会话日志里，装了会话搜索时可以按事件号读回来。', log)
           } catch (error) {
             // 报错本身宁可不报，也不能让这一轮死得无声无息。
             log('request-error', { agent: id, error: String((error && error.message) || error) })
@@ -446,7 +500,7 @@ export function foldPending(ctx, config, queues, payload, log) {
     // 记一次跳过（不是失败）、把这一条丢掉，原因留给 /context-status，不再每轮白撞。
     if (r.reason === 'empty' || r.reason === 'disabled') return
     if (r.callId) queue.delete(String(r.callId))
-    const STRUCTURAL = ['no-entry', 'no-tail-pair', 'parallel-call', 'not-tail', 'node-unknown', 'error-result', 'no-nodes', 'no-messages']
+    const STRUCTURAL = ['no-entry', 'no-tail-pair', 'parallel-call', 'not-tail', 'node-unknown', 'error-result', 'not-adjacent', 'no-nodes', 'no-messages']
     if (STRUCTURAL.includes(r.reason)) {
       // 尾部那一对已经不是我们的调用时（no-tail-pair 不带 callId），队列里剩下的全是陈旧项。
       // 表层本身不够两条节点（no-nodes / no-messages）同理：这一轮什么都没折的必要，直接清空。
@@ -471,6 +525,7 @@ export function foldPending(ctx, config, queues, payload, log) {
 
 // 折叠没成的原因翻译成一句能给人看的话（/context-status 直接显示）。
 const FOLD_REASON_TEXT = {
+  'not-adjacent': '调用与返回之间夹了别的节点',
   'error-result': '这次调用的结果本身是失败的，不折（留着原样，免得短注说"已经成功"）',
   'node-unknown': '定位不到这次调用在表层上的位置（会话里出现了空节点），这一条不再重试',
   'no-entry': '待折队列里没有这一条（多半是同一 callId 又被调了一次），不再重试',
@@ -491,23 +546,6 @@ const FOLD_REASON_TEXT = {
 // 既不额外多算一遍，也不会拿开头那一步的旧数字去说话。
 // 轮次大纲损坏的判定（设计约束）：只有"日志在手、且与表层自相矛盾"才算损坏。
 // 日志里根本没有 turn/start（测试桩、或宿主换了装载方式）时宁可先不动——那是"看不到"，不是"矛盾"。
-// 配置硬错误：keepTurns 是"原文区必须留住的最后 N 轮"，0 等于允许把正在进行的轮也压掉。
-// 这里定：配成 0 就报红色错误、终止这次对话，而不是悄悄按 2 跑。
-function fatalConfig(config) {
-  const keep = config && config.keepTurns
-  if (typeof keep === 'number' && Number.isFinite(keep) && keep >= 1) return null
-  return (
-    `Ebbing Context 已停用这次对话：配置里的 keepTurns 是 ${String(keep)}，必须是 ≥ 1 的整数。` +
-    '它规定原文区至少留住的最后几轮。' +
-    // 说清真实后果（回归修复）：插件任何时候都不会压"正在进行的这一轮"，
-    // 所以这个值越小，可压范围越小；等于 0 时地图会认为当前轮也能压，
-    // 而真正压缩时它必被拒——于是级联永远要求一个建不出来的 l0，整个插件一次都压不动。
-    '配成 0 的后果不是"多压一轮"，而是"一轮都压不动"：插件从不压正在进行的轮次，' +
-    '而级联又要求同批带上 l0，两边一撞，每次 compress 都会被拒。' +
-    '请到插件页把它改回 1 以上（默认 2），改完下一次请求就会恢复。'
-  )
-}
-
 // 是不是子代理？宿主建 agent 时用 `agents.enter(agent, owner)` 登记父子关系，
 // `roots()` 返回所有顶层 agent（ref/upstream/installed/agent.index.js:617-625）。
 // 默认不打扰子代理：它们是我们派出去干活的助手，不是用户在聊的这份对话。
@@ -523,7 +561,7 @@ function isSubagent(ctx, agent) {
   }
 }
 
-function fatalOutline(ctx, payload, zones) {
+function fatalOutline(ctx, payload, zones, log) {
   try {
     const id = payload && payload.agent && payload.agent.id
     const session = id ? ctx.sessions.get(id) : null
@@ -554,7 +592,9 @@ function fatalOutline(ctx, payload, zones) {
       '所以插件拒绝在这种表上继续工作。注意：这一条消息没有被存进历史（宿主已把它从队列取走），' +
       '修好之前请不要再发。要接着用这份历史，请在插件页关掉 Ebbing Context；关掉后本对话恢复可用。'
     )
-  } catch {
+  } catch (error) {
+    // 自检本身失败时不能装作"没事"：记一条，至少日志里查得到（第六轮审查 B）。
+    if (typeof log === 'function') log('fatal-outline-failed', { error: errText(error) })
     return null
   }
 }
@@ -625,7 +665,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   if (st.zonesTurn !== turn) {
     st.zonesTurn = turn
     // 区配额与触发线必须用同一个分母（可用输入预算），否则两套账。
-    st.zonesOver = readZoneOver(session, config, usage.budget, stepZones)
+    st.zonesOver = readZoneOver(session, config, usage.budget, stepZones, log)
     st.ambiguous = stepZones ? stepZones.ambiguous === true : false
   }
   // 「哪一层现在真压得动」只在**可能真开口**时才估（回归修复）：
@@ -635,27 +675,63 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     ['l1', 'l2', 'l3'].some((key) => st.zonesOver && st.zonesOver[key])
   if (maybeTell && st.compressTurn !== turn) {
     st.compressTurn = turn
-    try {
-      const live = stepZones || readZones(ctx, session, payload && payload.agent, log)
-      st.ambiguous = live.ambiguous === true
-      const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
-      // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
-      // 因为叫醒之后大概率只能换来一次失败（成本口径）。
-      st.compressible = {
-        l0: worthCompressing(live, 'l0', keepTurns),
-        l1: worthCompressing(live, 'l1', keepTurns),
-        l2: worthCompressing(live, 'l2', keepTurns),
-        l3: worthCompressing(live, 'l3', keepTurns),
+    // 第一步：把表层读出来。读失败按用户 2026-11-05 的裁定**降级**（不抛红）：抛出发生在
+    // 用户消息已经被 claim 之后，持续故障时每一轮都会吞掉一条用户消息。
+    let live = stepZones
+    if (!live) {
+      try {
+        live = readZones(ctx, session, payload && payload.agent, log)
+      } catch (error) {
+        // 用户 2026-11-05 裁定：读不出表层**不再停对话**。旧做法抛红，但这个抛错发生在
+        // 用户消息已经被 claim 之后，宿主 turn 的 catch 不入队 —— 持续故障时每一轮都会
+        // 吞掉一条用户消息，而回执还让用户"把报错发给我"，一发又吞一条。
+        // 现在：记日志、本轮不做任何压缩判断、留一条可见说明；工具调用仍照常报硬错
+        // （工具错误是回给模型的，不会丢消息）。
+        const detail = String((error && error.message) || error)
+        if (typeof log === 'function') log('surface-read-failed', { agent: id, error: detail })
+        st.ambiguous = true
+        st.compressible = { l0: false, l1: false, l2: false, l3: false }
+        st.envBlocked = { l0: false, l1: false, l2: false, l3: false }
+        if (!st.readFailedNoticed) {
+          st.readFailedNoticed = true
+          try {
+            appendNotice(ctx, id,
+              '〔Ebbing Context 提示 · 插件注入，不是用户说的话〕\n' + OWN_SENTINEL + '\n' +
+              '这一轮读不出会话表层（' + detail + '），分层压缩与提醒这次先跳过，对话本身不受影响。' +
+              '如果之后每一轮都这样，压缩会一直不可用——把这段原话发出来，我按这条查。', log)
+          } catch (noticeError) {
+            if (typeof log === 'function') log('surface-read-notice-failed', { agent: id, error: String((noticeError && noticeError.message) || noticeError) })
+          }
+        }
+        live = null
       }
-      // l0 压不动有两种原因：内容（只剩 keepTurns 保住的轮）与环境（轮次大纲损坏、
-      // 拿不到轮号、缺轮把上界夹住）。只有"内容原因"才该拖住深层的提醒——环境坏掉时
-      // l1/l2 照样能用，拿它把整个金字塔拖黑，等于地图写着"l1/l2 照常"而提醒永远不发（设计约束）。
-      // 缺轮也归环境：那是"定不了边界"，不是"没内容可压"。
-      st.envBlocked = envBlockedOf(live)
-    } catch {
-      st.ambiguous = false
-      st.compressible = null
-      st.envBlocked = null
+    }
+    // 第二步：判据本身。这里是纯计算（worthCompressing / zoneRangeCost / envBlockedOf），
+    // 它抛错意味着我们的代码有 bug，不是会话坏了——记日志、本轮不叫醒，绝不因此停掉整段对话
+    // （回归修复）。
+    if (live) {
+      try {
+        st.ambiguous = live.ambiguous === true
+        const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
+        // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
+        // 因为叫醒之后大概率只能换来一次失败（成本口径）。
+        st.compressible = {
+          l0: worthCompressing(live, 'l0', keepTurns, config),
+          l1: worthCompressing(live, 'l1', keepTurns, config),
+          l2: worthCompressing(live, 'l2', keepTurns, config),
+          l3: worthCompressing(live, 'l3', keepTurns, config),
+        }
+        // l0 压不动有两种原因：内容（只剩 keepTurns 保住的轮）与环境（轮次大纲损坏、
+        // 拿不到轮号、缺轮把上界夹住）。只有"内容原因"才该拖住深层的提醒——环境坏掉时
+        // l1/l2 照样能用，拿它把整个金字塔拖黑，等于地图写着"l1/l2 照常"而提醒永远不发（设计约束）。
+        // 缺轮也归环境：那是"定不了边界"，不是"没内容可压"。
+        st.envBlocked = envBlockedOf(live)
+      } catch (error) {
+        if (typeof log === 'function') log('worth-compressing-failed', { agent: id, error: String((error && error.message) || error) })
+        st.ambiguous = true
+        st.compressible = { l0: false, l1: false, l2: false, l3: false }
+        st.envBlocked = { l0: false, l1: false, l2: false, l3: false }
+      }
     }
   }
   if (st.ambiguous) {
@@ -973,7 +1049,7 @@ function deliverNotice(ctx, config, state, record, log) {
   }
 
   const turn = typeof record.turn === 'number' ? record.turn : st.turn
-  const text = noticeText(ctx, config, record, record.count)
+  const text = noticeText(ctx, config, record, record.count, log)
   const message = userMessage({ content: [{ type: 'text', text }], source: { kind: NOTICE_KIND } })
 
   // 记账放在"真的发出去"之后：先记账会让"投递失败"也算发过，
@@ -1028,7 +1104,7 @@ function deliverNotice(ctx, config, state, record, log) {
   }
   try {
     // followup 不可用时的退化路径：直接追加到表层。同样不许在空表层上写（见 appendOwn）。
-    if (surfaceIsEmpty(session)) {
+    if (surfaceIsEmpty(session, log)) {
       log('append-skip-empty-surface', { agent: id, kind: NOTICE_KIND })
       return
     }
@@ -1039,7 +1115,7 @@ function deliverNotice(ctx, config, state, record, log) {
   }
 }
 
-function noticeText(ctx, config, record, count) {
+function noticeText(ctx, config, record, count, log) {
   const usage = record.usage
   const zoneOver = record.zoneOver || {}
   const reasons = record.reasons
@@ -1076,9 +1152,14 @@ function noticeText(ctx, config, record, count) {
     mapText = renderMap(ctx, record.agent, config, usage).text
     if (mapText) {
       mapText = '\n\n' + mapText
-      issueFor(ctx, record.agent)
+      issueFor(ctx, record.agent, log)
     }
-  } catch {}
+  } catch (error) {
+    mapText = ''
+    // 这是全库唯一一个原本不记日志的 catch（第六轮审查 B）：读不到地图时提醒照发，
+    // 正文里却还写着"照下面给的位置"——必须留下痕迹，才好排查。
+    if (typeof log === 'function') log('notice-map-failed', { error: errText(error) })
+  }
 
   return (
     // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
@@ -1092,8 +1173,11 @@ function noticeText(ctx, config, record, count) {
     '压不压由你判断：要压掉的那几轮里如果有还没做完的事（目标还没收尾、todo 没打完、还在验证、等用户拍板），' +
     '或者内容接下来明显还要用到，就留着别动——这一轮允许什么都不压，按原计划继续干活即可。' +
     parts.join('') +
-    '决定要压时：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
-    '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。' +
+    (mapText
+      ? '决定要压时：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
+        '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。'
+      : '决定要压时：这次没能生成地图（插件内部出错，先别压，按原计划继续），别凭记忆压——先调一次 context_map 拿到位置再动手；' +
+        '如果连 context_map 也读不到，就照实告诉用户这一版没法压，别自己猜轮号。') +
     '不压也回一句为什么（例如"还没做完，先留着"），不要沉默，也不要假称压过了。' +
     '压完只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。' +
     mapText
@@ -1106,18 +1190,20 @@ function fmt(n) {
 }
 
 // 尾部追加一条提示，不碰前缀。失败静默：提示发不出去不该影响这一轮。
-function appendNotice(ctx, agentId, text) {
-  appendOwn(ctx, agentId, text, NOTICE_KIND)
+function appendNotice(ctx, agentId, text, log) {
+  appendOwn(ctx, agentId, text, NOTICE_KIND, log)
 }
 
 // 插件自己往会话里写一条文本节点（提醒 / 轮次标记）。
 // 只能用 user/message：assistant/message 不能带 sourceEventSeqs（插不进去），
 // system/message 会覆盖 historySystem，developer/message 收尾 flush 会抛 unsupported。
-function surfaceIsEmpty(session) {
+function surfaceIsEmpty(session, log) {
   try {
     const nodes = session && session.surface && Array.isArray(session.surface.nodes) ? session.surface.nodes : null
     return !!nodes && nodes.length === 0
-  } catch {
+  } catch (error) {
+    // 读不出表层时保守地当"非空"（不跳过写入），但要留痕：否则坏表层下每步都白写一遍。
+    if (typeof log === 'function') log('surface-empty-check-failed', { error: errText(error) })
     return false
   }
 }
@@ -1132,7 +1218,7 @@ function appendOwn(ctx, agentId, text, kind, log) {
   // 宿主写系统头之前（`dsh-agent-loop` 先 assemble、再 append `system/message`），
   // 此时写标记就会抢在头前面——当时跑得好好的，关闭重开后整份日志被判 corrupt，
   // 会话永远打不开。宁可这一轮没有标记，也不能让日志变成不可读的。
-  if (surfaceIsEmpty(session)) {
+  if (surfaceIsEmpty(session, log)) {
     if (typeof log === 'function') log('append-skip-empty-surface', { agent: agentId, kind })
     return false
   }
@@ -1140,7 +1226,10 @@ function appendOwn(ctx, agentId, text, kind, log) {
     const message = userMessage({ content: [{ type: 'text', text }], source: { kind } })
     session.append('user/message', message, { surfaceOp: 'append' })
     return true
-  } catch {
+  } catch (error) {
+    // 写节点失败不致命（这一轮少了标记/提醒），但必须留痕：否则事后查“为什么没有轮次标记”
+    // 会完全找不到线索。
+    if (typeof log === 'function') log('append-own-failed', { agent: agentId, kind, error: String((error && error.message) || error) })
     return false
   }
 }
@@ -1243,14 +1332,12 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         // "地图必调"是同一件事的两面：模型要改对参数，必须先看到**块标题、每层压力、
         // 可压区间**这三样——只给一行 to 的数字，它不知道错在哪、为什么错，只能再撞一次。
         // 代价（450–690 token/次）是设计上认过的账，不许拿"省 token"当理由改成紧凑版。
-        const mapText = fullMap(ctx, agent, config)
-        if (mapText) issueFor(ctx, agent)
+        const mapText = fullMap(ctx, agent, config, log)
+        if (mapText) issueFor(ctx, agent, log)
         return { text: `没能压缩：${result.reason}${landed}` + (mapText ? '\n\n' + mapText : '') }
       }
       log('compress-ok', { keys: result.results.map((r) => r.key), prunedChars: result.prunedChars })
-      const lines = result.results.map(
-        (r) => `${r.key} 成功：${r.title}（${r.shadowedCount} 条 -> 省 ${r.savedTokens} token）`,
-      )
+      const lines = describeResults(result.results)
       if (result.prunedChars > 0) {
         lines.push(`顺带把超大的工具结果剪短了 ${result.prunedChars} 个字符（原文仍在日志里，可查回）。`)
       }
@@ -1263,9 +1350,9 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       // 注意顺序：刷新后的地图必须在 rememberFold **之前**并进 lines，否则它跟着被折掉的结果一起消失——
       // 模型既看不到地图，又以为"地图随结果来了"，下一次照旧位置压，必被拒。
       // 设计稿 §2.7 / §11 要求压缩成功也带刷新后的地图（ae398aa 起就是行为约定）。
-      const mapText = fullMap(ctx, agent, config)
+      const mapText = fullMap(ctx, agent, config, log)
       if (mapText) lines.push(mapText)
-      if (mapText) issueFor(ctx, agent)
+      if (mapText) issueFor(ctx, agent, log)
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
       // 增长触发（notice.growthTokens）要等用量爬回压缩前的高度才可能再响——等于报废。
       resetGrowthBaseline(ctx, agent, config, reminded)
@@ -1311,22 +1398,28 @@ function resetGrowthBaseline(ctx, agent, config, state) {
 // 把这一轮的地图许可证续上：位置是刚刚现算的，照它压不会错。
 // 为什么续：地图只在取到时有效，而"压完一层还想再压一层"是最常见的动作；
 // 不续的话第二次压必被假报"地图过期"，白烧一个来回。
-function issueFor(ctx, agent) {
+function issueFor(ctx, agent, log) {
   try {
     const session = ctx.sessions.get(agent.id)
-    if (session) issue(agent.id, session, readZones(ctx, session, agent))
-  } catch {}
+    if (session) issue(agent.id, session, readZones(ctx, session, agent, log))
+  } catch (error) {
+    // 发不出证不致命（下一次 context_map 还能再发），但必须留痕：否则用户只会看到
+    // 下一次 compress 报「还没看过地图」，方向完全指错。
+    if (typeof log === 'function') log('license-issue-failed', { error: errText(error) })
+  }
 }
 
 // 完整地图（块表 + 每层压力 + 可压区间 + 须知）。提醒、拒绝回执、成功回执三处共用同一份。
 // 设计稿 §11「提醒里直接带地图」与 §2.7「地图必调」是同一件事的两面：模型的 `to`
 // 只能从一张现算的地图里抄，而这三种时刻恰好都是"它马上要填表"的时刻。
-function fullMap(ctx, agent, config) {
+function fullMap(ctx, agent, config, log) {
   try {
     const session = ctx.sessions.get(agent.id)
     const usage = session ? readUsage(ctx, session, config) : null
     return renderMap(ctx, agent, config, usage).text || ''
-  } catch {
+  } catch (error) {
+    // 回执里少一张地图，模型就只能凭记忆压——这种退化必须能在日志里看见。
+    if (typeof log === 'function') log('full-map-failed', { error: errText(error) })
     return ''
   }
 }
@@ -1516,7 +1609,7 @@ function reservedTokens(ctx, session, config) {
 
 // 各区实际占用：用插件自己的估算器（跟地图里显示的一致）。
 // 不用宿主的计价：它按 4 字 1 token，中文被低估约 4 倍，区超限提醒在中文会话里几乎不会触发。
-function readZoneOver(session, config, window, zones) {
+function readZoneOver(session, config, window, zones, log) {
   const over = {}
   try {
     const live = zones || readZones(null, session)
@@ -1526,7 +1619,10 @@ function readZoneOver(session, config, window, zones) {
       const limit = Math.round((config.budget[key] || 0) * window)
       if (limit > 0 && used > limit) over[key] = { used, limit }
     }
-  } catch {}
+  } catch (error) {
+    // 区超限提醒会整体消失（返回空表），必须留痕，否则"这轮怎么没提醒"查不出来。
+    if (typeof log === 'function') log('zone-over-failed', { error: errText(error) })
+  }
   return over
 }
 
@@ -1563,10 +1659,16 @@ export function mergeConfig(raw) {
     notice: { ...DEFAULTS.notice, ...(source.notice || {}) },
     title: { ...DEFAULTS.title, ...(source.title || {}) },
   }
-  // 取整必须落在**运行时出口**（回归修复）：`validateConfig` 收到的是 `unwrapVolatile`
-  // 造出来的副本，改那个副本不会回流到 raw；而地图与判轮读的是这里，所以在这里取整。
-  if (typeof merged.keepTurns === 'number' && Number.isFinite(merged.keepTurns)) {
-    merged.keepTurns = Math.trunc(merged.keepTurns)
+  // keepTurns 的取整与兜底必须落在**运行时出口**（回归修复）：`validateConfig` 收到的是
+  // `unwrapVolatile` 造出来的副本，改那个副本不会回流到 raw；而地图与判轮读的是这里。
+  // 用户 2026-11-05 定：面板 min=1 拦正常输入，插件侧兜底夹到 1..50——不再每轮抛红停用。
+  // 类型错（字符串/布尔/对象）在 validateConfig 已经报错；这里只对数字做夹取，
+  // 非数字退回默认值——两条路径给同一个答案，免得 validate 说 1、运行时说 2。
+  if (merged.keepTurns !== undefined) {
+    const keep = merged.keepTurns
+    merged.keepTurns = typeof keep === 'number' && Number.isFinite(keep)
+      ? Math.min(50, Math.max(1, Math.trunc(keep)))
+      : DEFAULTS.keepTurns
   }
   return merged
 }

@@ -7,7 +7,9 @@ import { mergeConfig } from '../index.js'
 const KNOWN_TOP = ['budget', 'segment', 'title', 'notice', 'pruneFirst', 'foldCallRecord', 'requireSessionQuery', 'reservedTokens', 'triggerPct', 'keepTurns']
 
 let failed = 0
+let total = 0
 const reject = (name, cfg, mustInclude) => {
+  total++
   try {
     validateConfig(cfg)
     console.error(`FAIL 应拒绝但通过了: ${name}`)
@@ -50,6 +52,7 @@ const reject = (name, cfg, mustInclude) => {
 }
 
 const accept = (name, cfg) => {
+  total++
   try {
     validateConfig(cfg)
   } catch (error) {
@@ -147,4 +150,25 @@ if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
 }
-console.log('config 断言测试全部通过（' + 15 + ' 项）')
+// 这个文件没有统一的 check 计数，写死数字会飘（曾写 15、实际 17）。
+// keepTurns：面板 min=1 拦正常输入，插件侧兜底取 1（用户 2026-11-05 定）。
+// 以前放 0 进来靠 pre-step 的 fatalConfig 每轮抛红，会把整段对话打死。
+pass0: {
+  const zero = mergeConfig({ keepTurns: 0 })
+  if (zero.keepTurns !== 1) throw new Error('keepTurns 0 应该兜底取 1，实际 ' + JSON.stringify(zero.keepTurns))
+  const half = mergeConfig({ keepTurns: 0.5 })
+  if (half.keepTurns !== 1) throw new Error('keepTurns 0.5 截断后应该取 1，实际 ' + JSON.stringify(half.keepTurns))
+  const negative = mergeConfig({ keepTurns: -3 })
+  if (negative.keepTurns !== 1) throw new Error('keepTurns 负数应该取 1，实际 ' + JSON.stringify(negative.keepTurns))
+  const huge = mergeConfig({ keepTurns: 999 })
+  if (huge.keepTurns !== 50) throw new Error('keepTurns 上限应该夹到 50，实际 ' + JSON.stringify(huge.keepTurns))
+  const normal = mergeConfig({ keepTurns: 3 })
+  if (normal.keepTurns !== 3) throw new Error('正常值不该被改，实际 ' + JSON.stringify(normal.keepTurns))
+}
+
+// 类型不对是"配置有错"，必须拒绝启动——不能悄悄花成默认值（设计意图回归修复：
+// 曾经用 Number() 强转，"abc" 会静默变成默认的 2，而 validateConfig 一条错都不报）。
+reject('keepTurns 写成字符串', { keepTurns: 'abc' }, 'keepTurns')
+reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
+
+console.log(`config 断言测试全部通过（${total + 5} 项）`)

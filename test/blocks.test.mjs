@@ -1,6 +1,6 @@
 // 区块划分与锚点解析的断言测试（失败以非零退出码结束）。
 // 跑法：node plugin/test/blocks.test.mjs
-import { canCompressZone, costOfMessage, isTurnBoundaryPair, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, turnBounds } from '../lib/blocks.js'
+import { PRODUCT_FLOOR, canCompressZone, costOfMessage, isTurnBoundaryPair, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, routeOf, productFloor, turnBounds, worthCompressing, writableTo, zoneRangeCost } from '../lib/blocks.js'
 
 let failed = 0
 let total = 0
@@ -63,7 +63,7 @@ const blockMessages = [
   { role: 'system', content: [{ type: 'text', text: 'sys' }] },
   {
     role: 'user',
-    content: [{ type: 'text', text: '〔L1｜T1–T1｜ev 10–40〕第 1 轮的结论' }],
+    content: [{ type: 'text', text: '〔L1｜T1–T1｜ev 10–40〕第 1 轮的结论\n' + '摘'.repeat(200) }],
     source: { kind: 'compact-checkpoint', compactionId: 'c1' },
   },
   { role: 'user', content: [{ type: 'text', text: 'T2 的问题' }] },
@@ -94,8 +94,9 @@ const fake = {
   currentTurn: 5,
   zones: {
     l0: [],
-    l1: [{ seq: 1, text: 'a' }, { seq: 2, text: 'b' }, { seq: 3, text: 'c' }],
-    l2: [{ seq: 4, text: 'd' }],
+    // 用中文正文：ASCII 按 4 字符/token 估，凑不够"最小产物成本"那道关。
+    l1: [{ seq: 1, text: '摘'.repeat(200) }, { seq: 2, text: '摘'.repeat(200) }, { seq: 3, text: '摘'.repeat(200) }],
+    l2: [{ seq: 4, text: '摘'.repeat(200) }],
     l3: [],
   },
 }
@@ -115,7 +116,8 @@ const wide = { ...zones, currentTurn: 5 }
 check('keepTurns 只挡最近几轮，更早的仍可压', resolveTurnAnchor(wide, 'T1', 2).ok, JSON.stringify(resolveTurnAnchor(wide, 'T1', 2)))
 const rawT4 = { zones: { l0: [{ seq: 1, turn: 4 }], l1: [], l2: [], l3: [] }, currentTurn: 5, turnStarts: [], turnStartIndex: new Map(), nodes: [1] }
 const tooNew = resolveTurnAnchor(rawT4, 'T4', 2)
-check('越过保护圈的轮号被拒并给出上限', !tooNew.ok && /最多压到 T2/.test(tooNew.reason), JSON.stringify(tooNew))
+// 名额上限是 T2，但 T2 及更早的轮在表层上没有原文：文案要把"名额"和"实际能不能写"分开说。
+check('越过保护圈的轮号被拒并给出名额上限', !tooNew.ok && /名额上限是 T2/.test(tooNew.reason) && /没有可写的 to/.test(tooNew.reason), JSON.stringify(tooNew))
 check('最远可压轮号 = 当前轮 − 1 − keepTurns', lastCompressibleTurn(zones, 0) === 1 && lastCompressibleTurn(zones, 1) === null)
 
 // 级联判据是"还能压"：某层只剩 1 块时不该再逼着一起压，否则整批永远过不去。
@@ -593,8 +595,8 @@ const unknownHeadSession = {
   surface: { nodes: [5, 70, 80] },
   deriveMessages: () => [
     { role: 'system', content: [{ type: 'text', text: 'sys' }] },
-    { role: 'user', content: [{ type: 'text', text: '〔L3｜T?+｜ev 12–40〕宿主拍平之后留下的那一块\n正文 A' }], source: { kind: 'compact-checkpoint' } },
-    { role: 'user', content: [{ type: 'text', text: '〔L3｜T4–T6｜ev 90–120〕我们自己压出来的一块\n正文 B' }], source: { kind: 'compact-checkpoint' } },
+    { role: 'user', content: [{ type: 'text', text: '〔L3｜T?+｜ev 12–40〕宿主拍平之后留下的那一块\n正文 A' + '摘'.repeat(200) }], source: { kind: 'compact-checkpoint' } },
+    { role: 'user', content: [{ type: 'text', text: '〔L3｜T4–T6｜ev 90–120〕我们自己压出来的一块\n正文 B' + '摘'.repeat(200) }], source: { kind: 'compact-checkpoint' } },
   ],
 }
 const unknownCtx = {
@@ -664,8 +666,177 @@ check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮
   check('costOfMessage 收到 null 时按 0 计（空节点不该让地图崩）', costOfMessage({}, null) === 0)
 }
 
+// 第六轮审查 A#2/A#4：缺轮与空轮要用不同的拒绝文案。
+const missZones = {
+  currentTurn: 5,
+  outlineFault: null,
+  turnStarts: [{ turn: 1, seq: 9 }, { turn: 2, seq: 19 }, { turn: 3, seq: 29 }, { turn: 5, seq: 49 }],
+  turnStartIndex: new Map([[1, 0], [2, 10], [3, 20], [4, 40]]),
+  nodeIndex: new Map([[9, 0], [19, 10], [29, 20], [49, 40]]),
+  turnNotes: [{ turn: 4, reason: 'missing' }],
+  zones: {
+    l0: [{ seq: 11, turn: 1 }, { seq: 21, turn: 2 }, { seq: 31, turn: 3 }, { seq: 51, turn: 5 }],
+    l1: [],
+    l2: [],
+    l3: [],
+  },
+}
+const missAnchor = resolveTurnAnchor(missZones, 'T4', 0)
+check('缺轮当 to：说清"这是缺轮、不能当 to"并列出缺的轮号',
+  missAnchor.ok === false && /缺轮/.test(missAnchor.reason) && /T4/.test(missAnchor.reason),
+  JSON.stringify(missAnchor))
+// 这里是「能写什么」，必须扣掉缺轮号：T4 是缺轮，可写上界只能到 T3（回归修复）。
+check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现在能写的是 T1–T3/.test(missAnchor.reason) && !/T1–T4/.test(missAnchor.reason), missAnchor.reason)
+
+// 第二十二组：物理切点 vs 可写的 to（回归修复）
+{
+  const zones = {
+    currentTurn: 5,
+    zones: { l0: [{ seq: 1, turn: 1 }, { seq: 2, turn: 2 }, { seq: 3, turn: 3 }], l1: [], l2: [], l3: [] },
+    turnNotes: [{ turn: 3, reason: 'missing' }],
+  }
+  check('物理切点落在缺轮上：可写的 to 要退到 T2', writableTo(zones, 0) === 2)
+  check('物理切点仍在 T3（缺轮内容要跟着前一轮一起被带走）', lastCompressibleTurn(zones, 0) === 3)
+  const noMissing = { ...zones, turnNotes: [] }
+  check('没有缺轮时两者一致', writableTo(noMissing, 0) === 3)
+  const allMissing = { currentTurn: 2, zones: { l0: [{ seq: 1, turn: 1 }], l1: [], l2: [], l3: [] }, turnNotes: [{ turn: 1, reason: 'missing' }] }
+  check('退到 0 就没有可写的 to', writableTo(allMissing, 0) === null)
+  // 空轮（有 turn/start、表层上没有这一轮的正文）同样写不得：可写的 to 要往回落一格。
+  // 回归修复：以前只退缺轮，模型照地图写空轮号必吃一次拒绝。
+  // fixture 必须让「空轮」真的落在 cutoff 上，否则 lastCompressibleTurn 的 lastRaw 夹一下，
+  // 新旧实现同值、断言空转（回归修复）。这里 T3 有 turn/start 但表层没有它的原文：
+  // 物理切点=3（T3 的内容跟着前一轮被带走），可写的 to 必须退到 2。
+  const emptyTurnZones = { currentTurn: 4, zones: { l0: [{ seq: 1, turn: 1 }, { seq: 2, turn: 2 }, { seq: 3, turn: 4 }], l1: [], l2: [], l3: [] }, turnNotes: [] }
+  check('空轮也算写不得：可写的 to 往回落一格，物理切点不动',
+    writableTo(emptyTurnZones, 0) === 2 && lastCompressibleTurn(emptyTurnZones, 0) === 3,
+    `${String(writableTo(emptyTurnZones, 0))} / ${String(lastCompressibleTurn(emptyTurnZones, 0))}`)
+}
+
+// 第二十三组：空轮与缺轮是两件事，文案要分开（回归修复）
+{
+  const emptyTurnZones = {
+    currentTurn: 4,
+    zones: { l0: [{ seq: 3, originSeq: 3, turn: 1 }], l1: [], l2: [], l3: [] },
+    turnStarts: [{ turn: 1, seq: 1 }, { turn: 2, seq: 3 }, { turn: 3, seq: 5 }],
+    turnStartIndex: new Map([[1, 0], [2, 2], [3, 4]]),
+    turnNotes: [],
+    nodes: [3],
+  }
+  const empty = resolveTurnAnchor(emptyTurnZones, 'T2')
+  check('空轮：说「表层上已经没有原文了（空轮）」并指出最后能压的位置',
+    empty.ok === false && /（空轮）/.test(empty.reason) && /T1/.test(empty.reason), empty.reason)
+  check('空轮不说“缺轮”那套话', !/缺轮/.test(empty.reason), empty.reason)
+}
+
+
+// 第二十四组：首界标之前的无主原文（回归修复）
+{
+  const um = (t) => ({ role: 'user', content: [{ type: 'text', text: t }] })
+  const sess = {
+    surface: { nodes: [1, 3] },
+    log: [
+      undefined,
+      { type: 'user/message', data: um('T1 之前的问题（轮次记录丢了）') },
+      { type: 'turn/start', data: { turn: 2 } },
+      { type: 'user/message', data: um('T2 的问题') },
+    ],
+    deriveMessages: () => [um('T1 之前的问题（轮次记录丢了）'), um('T2 的问题')],
+    deriveEventMessage: (e) => (e && e.data) || null,
+    requestContext: () => ({ contextWindow: 100000 }),
+  }
+  const z = readZones({ get: () => null }, sess, null, () => {})
+  check('首界标之前的原文记进 orphan（不是静默消失）', !!z.orphan && z.orphan.count === 1, JSON.stringify(z.orphan))
+}
+check('块头能读回「T?–T2」这种下界未知的写法', JSON.stringify(parseHeader('〔L1｜T?–T2｜ev 1–4〕标题').meta.turns) === '[null,2]')
+check('块头能读回「ev 9–12+」这种事件号上界只是下限的写法（写得出就要读得回）', (() => { const m = parseHeader('〔L3｜T1–T2｜ev 9–12+〕标题').meta; return JSON.stringify(m.events) === '[9,12]' && m.eventsOpen === true })())
+
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
 }
+// 回归修复：标记补轮会改写 starts，currentTurn 必须跟着重算——
+// 否则地图说"当前第 N 轮"、而 T{N} 早已结束，最近一整轮压不了。
+{
+  const healSession = {
+    surface: { nodes: [5, 10, 20, 30, 40] },
+    deriveMessages: () => [
+      { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+      { role: 'user', content: [{ type: 'text', text: '〔轮次标记〕本轮 T1' }], source: { kind: 'ebbing-context-marker' } },
+      { role: 'user', content: [{ type: 'text', text: '第 2 轮的原文' }] },
+      { role: 'user', content: [{ type: 'text', text: '〔轮次标记〕本轮 T3' }], source: { kind: 'ebbing-context-marker' } },
+      { role: 'user', content: [{ type: 'text', text: '第 3 轮的原文' }] },
+    ],
+  }
+  const healCtx = {
+    get: (name) => (name === 'sessionProjections'
+      ? { stateOf: () => ({ turns: [{ turn: 1, seq: 10 }, { turn: 2, seq: 20 }] }) }
+      : null),
+  }
+  const hz = readZones(healCtx, healSession)
+  check('标记补进来的轮要更新 currentTurn（否则最近一轮永远压不了）',
+    hz.currentTurn === 3 && hz.turnStarts.some((s) => s.turn === 3),
+    JSON.stringify({ currentTurn: hz.currentTurn, starts: hz.turnStarts }))
+  check('补轮之后 T2 被认成"已结束"（不再报"还没结束"）',
+    resolveTurnAnchor(hz, 'T2').ok === true, JSON.stringify(resolveTurnAnchor(hz, 'T2')))
+}
+
+// 路由来源的顺序：agent.model.current() → session.requestContext() → agent.options。
+// rc.1 起第一条才是"记录下来的选择"，options 只是回退（model-selection.ts:105-115）。
+{
+  const agent = {
+    model: { current: () => ({ provider: 'p-model', model: 'm-model' }) },
+    options: { provider: 'p-options', model: 'm-options' },
+  }
+  const session = { requestContext: () => ({ provider: 'p-req', model: 'm-req' }) }
+  check('路由优先 agent.model.current()', JSON.stringify(routeOf(agent, session)) === JSON.stringify({ provider: 'p-model', model: 'm-model' }),
+    JSON.stringify(routeOf(agent, session)))
+  check('没有 model.current 时退回 requestContext',
+    JSON.stringify(routeOf({ options: { provider: 'p-options' } }, session)) === JSON.stringify({ provider: 'p-req', model: 'm-req' }))
+  check('两者都没有才用 options',
+    JSON.stringify(routeOf({ options: { provider: 'p-options', model: 'm-options' } }, {})) === JSON.stringify({ provider: 'p-options', model: 'm-options' }))
+  check('全都没有返回 null', routeOf(null, null) === null)
+  check('model.current 抛错时安静退回', JSON.stringify(routeOf({ model: { current() { throw new Error('x') } }, options: { provider: 'p' } }, session)) === JSON.stringify({ provider: 'p-req', model: 'm-req' }))
+}
+// —— 成本闸门（用户 2026-11-05 第 2 条）：可压区间的合计盖不住改写开销时，这一层判为不可压 ——
+// 死锁场景：L1 恰好 2 块、每块 116 token → 能压的只有第一块，116 < 改写开销，
+// compress 一定回「压完反而更大」；提醒若照发，模型每轮都要撞一次。
+const gateZones = (sizesByKey) => {
+  const size = new Map()
+  let seq = 1
+  const mk = (key, sizes) => sizes.map((n) => {
+    const s = seq++
+    size.set(s, n)
+    return { seq: s, tier: key === 'l3' ? 3 : key === 'l2' ? 2 : 1 }
+  })
+  const l1 = mk('l1', sizesByKey.l1 || [])
+  const l2 = mk('l2', sizesByKey.l2 || [])
+  const l3 = mk('l3', sizesByKey.l3 || [])
+  const l0 = mk('l0', sizesByKey.l0 || [])
+  return {
+    nodes: [...l1, ...l2, ...l3, ...l0].map((b) => b.seq),
+    messages: [],
+    zones: { l1, l2, l3, l0 },
+    messageFor: (s) => ({ role: 'user', content: [{ type: 'text', text: '摘'.repeat(size.get(s) || 0) }] }),
+    currentTurn: 99,
+  }
+}
+{
+  const tiny = gateZones({ l1: [116, 116] })
+  check('L1 两块各 116：可压区间盖不住改写开销 → 判为不可压', worthCompressing(tiny, 'l1') === false,
+    JSON.stringify(zoneRangeCost(tiny, 'l1')))
+  // 关键：级联用的 canCompressZone 必须给出同一个答案，否则地图说"暂不可用"、回执说"必须压它"。
+  check('级联判据与叫醒判据同源：canCompressZone(l1) 也必须是 false', canCompressZone(tiny, 'l1') === false)
+  check('zoneRangeCost 只算能压的那一段（最后一块不能压）', zoneRangeCost(tiny, 'l1') === 116)
+  const enough = gateZones({ l1: [200, 200] })
+  check('L1 第一块 200 > 开销：照旧可压', worthCompressing(enough, 'l1') === true)
+  const l3tiny = gateZones({ l3: [117] })
+  check('L3 单块 117：整区压成一块也盖不住开销 → 不可压', worthCompressing(l3tiny, 'l3') === false)
+  const l3ok = gateZones({ l3: [400, 300] })
+  check('L3 两块合计 700：可压', worthCompressing(l3ok, 'l3') === true)
+  check('地板：块层 138（会话搜索开）/ 126（关）', productFloor('l1', {}) === 138 && productFloor('l1', { requireSessionQuery: false }) === 126)
+check('地板：l0 多一行交界声明 +21', productFloor('l0', {}) === 159 && productFloor('l0', { requireSessionQuery: false }) === 147)
+check('地板：区间里每张图 +38（关掉会话搜索 +26）', productFloor('l2', {}, 2) === 138 + 76 && productFloor('l2', { requireSessionQuery: false }, 1) === 152)
+check('地板常量与函数一致（改一处漏一处会红）', PRODUCT_FLOOR.blockQuery === 138 && PRODUCT_FLOOR.l0Extra === 21)
+}
+
 console.log(`blocks 断言测试全部通过（${total} 项）`)
