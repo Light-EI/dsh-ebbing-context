@@ -117,6 +117,11 @@ try {
   // 主目录文件只读（Windows 上 rename 失败）→ 新值写进临时目录；读必须拿新的那份，不能主目录旧值遮蔽
   const roId = `${uniq}-readonly`
   check('先写一份基线 100 到主目录', writeGrowth(roId, { tokens: 100, growthQuota: null, lineOn: false }) === true)
+  // 把主目录那份的时间戳钉成"明显更旧"：`updatedAt` 只到毫秒，快速机器上"写 100"与"退级写 200"
+  // 可能落进同一毫秒，而有的 CI 文件系统 mtime 只到秒——两边都并列时就退化成"主目录优先"，
+  // 这条用例会随机红（v0.2.2 的 Ubuntu CI 上实际红过一次）。这里要钉的是
+  // "旧的主目录副本不能遮蔽新的临时副本"，把旧那份写成 2020 年即可确定，不依赖计时精度。
+  writeFileSync(fileOf(roId), JSON.stringify({ v: 1, tokens: 100, growthQuota: null, lineOn: false, updatedAt: '2020-01-01T00:00:00.000Z' }))
   // 让主目录写不进去的手段按平台分：Windows 锁文件（rename 覆盖只读文件 EPERM）；
   // POSIX 上 rename 覆盖只读文件是允许的、锁不住，只能让目录不可写（发版 CI 是 Ubuntu）。
   // root 无视目录权限（0555 挡不住），这条用例会误报红；CI 是非 root，root 下跳过。
