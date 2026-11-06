@@ -124,6 +124,14 @@ check('可写区间不含缺轮号（T3 缺 → 上界退到 T2）',
   /可写 to=T\d+(?:–T\d+)?（/.test(longGapText) && !/可写 to=[^（]*T3/.test(longGapText)
     && !/可写 to=T(\d+)–T\1/.test(longGapText),
   longGapText.slice(0, 600))
+// 设计约束 裁定：l0 行的括号里要带上取舍口径，别让"可写"看起来像"该压"。
+// 断言必须按行钉：光钉短语在整张图里出现过，把它挪到"压缩须知"下面测试照样绿（回归修复）。
+{
+  const l0Line = longGapText.split('\n').find((l) => l.startsWith('l0')) || ''
+  check('l0 行的括号里说明"只压已经收尾的、还在推进的留着"',
+    /可写 to=T\d+(?:–T\d+)?（[^）]*只压已经收尾、结果已落地的内容，还在推进或接下来还要用的留着[^）]*）/.test(l0Line),
+    l0Line.slice(0, 700))
+}
 
 // 只有一个可写轮时写单值 `可写 to=T1（`，不能写成 `T1–T1`（回归修复）。
 {

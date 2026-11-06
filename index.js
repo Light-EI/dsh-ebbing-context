@@ -15,6 +15,7 @@ import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
 import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, FOLD_KIND } from './lib/callfold.js'
 import { makeLogger, logStatus } from './lib/log.js'
+import { lastStateFailure, lastStateFallback, readGrowth, writeGrowth } from './lib/state.js'
 
 export const name = NAME
 // 宿主会按这份表决定"服务没就绪就不加载插件"。`sessionProjections` 只是性能退路
@@ -632,19 +633,23 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 拿不到轮号就别开口：`autoTurn` 的初值也是 null，`null === null` 恒真，
   // 会把"每个会话的第一条提醒"永久吃掉（宿主现在恒给数字，这里只防兜底漏洞）。
   if (turn === null) return
-  let st = state.get(id)
-  if (!st) {
-    st = newState()
-    state.set(id, st)
-  }
+  const st = ensureState(ctx, state, id)
 
   // 第一次见到这个会话就把"上一次提醒时的量"定为当前量，否则增长触发永远没有基线、开不了口。
-  if (st.tokens === null) st.tokens = usage.used
+  if (st.tokens === null) {
+    st.tokens = usage.used
+    persistGrowth(ctx, id, st, log)
+  }
   // 到线指示灯要在这里维护，不能放到"被叫醒就早退"之后：叫醒轮本来就该跳过登记，
   // 但它在那一轮里可能把占用压到线下、又被下一条大消息顶回线上——早退时跳过复位，
   // 这次"掉下去又越上来"就永远不报了（回归修复）。
   const aboveLine = usage.ratio >= config.triggerPct
-  if (!aboveLine) st.lineOn = false
+  if (!aboveLine && st.lineOn) {
+    st.lineOn = false
+    // 灯灭要落盘：否则重启后 hydrate 回 true，下一次越线会被当成"还亮着"，
+    // 吞掉一次到线提醒（审查 0883a196 Major 2）。
+    persistGrowth(ctx, id, st, log)
+  }
   // 会话搜索没开时 compress 与 context_map 都停用：叫醒只会让模型照地图撞墙（回归修复）。
   // 闸门必须放在上面两行**之后**：整个"停用 → 启用"期间占用掉到线下时，指示灯也得复位，
   // 否则重新启用后再次越线会被当成"还亮着"，那一次到线提醒永久丢掉（回归修复）。
@@ -681,6 +686,21 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
       // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（回归修复）。
       st.compressTurn = null
     }
+  }
+  // 基线比当前用量还高（宿主 /compact、剪枝、窗口变小）：grew 会长期为负，增长触发
+  // 要等用量爬回旧基线才可能再响。以当前用量为新基线重新起算（审查 0883a196 8）。
+  // 必须放在"占用明显下降"检测**之后**：那个检测也读 st.tokens，提前改它会让压缩后的
+  // 旧区快照不被作废（S2 回归测试抓到的正是这条）。
+  if (typeof st.tokens === 'number' && usage.used > 0 && usage.used < st.tokens) {
+    // `used > 0` 防的是读数瞬时归零/少计：把基线写成 0，下一步就会凭空报一次增长。
+    const from = st.tokens
+    st.tokens = usage.used
+    // 缩水 = 表层在插件没看见的时候被压过（宿主 /compact、剪枝、窗口变小）。
+    // 按 §7.4「任何原因触发的压缩都重置增长状态」的口径，半额门槛也一起清掉；
+    // 留着它会让下一次提醒按缩水前的半额早来。
+    st.growthQuota = null
+    persistGrowth(ctx, id, st, log)
+    log('growth-baseline-shrunk', { agent: id, from, to: st.tokens })
   }
   // 区超限要全量扫一遍日志，所以每轮最多扫一次；同一轮后面几步复用这次结果，
   // 既省重复扫描，也免得同一条提醒在几步之间理由来回变。
@@ -783,6 +803,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
       st.growthLamp = false
       st.growthQuota = Math.max(1, Math.round(config.notice.growthTokens * 0.5))
       st.tokens = usage.used
+      persistGrowth(ctx, id, st, log)
       log('growth-silent', { agent: id, turn, grew })
     }
   }
@@ -858,6 +879,80 @@ function newState() {
   }
 }
 
+// ── 增长状态的落盘（重启不清零）────────────────────────────────────────────
+// 为什么只存这三个数：增长线只看"基线用量、当前门槛、到线指示灯"；轮内的东西
+// （growthPending、autoTurn）只对当前这轮有意义，重开后重算即可。
+// 键是 session.id：agent.id 在重启后可能变，session.id 稳定，且随会话文件走。
+// 两处候选都读不到有效记录时就当"没有存过"——状态丢了只是退回按当前用量起步，绝不能影响主流程。
+// 取状态：没有就建。**建的任何一条路都要先把盘上的基线灌回来**——
+// 重启后第一次 pre-step 可能因为拿不到用量读数而提前返回，状态会被轮次标记、提醒投递
+// 这些旁路建出来；如果它们建出的空状态不 hydrate，下一次 pre-step 看到 st 已存在就跳过
+// 回灌，再把基线设成当前用量落盘，盘上的旧基线就被冲掉了（审查 0883a196 Major 1）。
+function ensureState(ctx, state, id) {
+  const st = state.get(id)
+  if (st) {
+    // 状态在、但基线还没定下来：说明它是在"看不到用量"的那一步由旁路建出来的，补回灌。
+    if (st.tokens === null) hydrateGrowth(ctx, id, st)
+    return st
+  }
+  const fresh = newState()
+  hydrateGrowth(ctx, id, fresh)
+  state.set(id, fresh)
+  return fresh
+}
+
+export function hydrateGrowth(ctx, id, st) {
+  try {
+    const session = ctx && ctx.sessions && typeof ctx.sessions.get === 'function' ? ctx.sessions.get(id) : null
+    const sid = session && typeof session.id === 'string' ? session.id : ''
+    if (!sid) return false
+    const saved = readGrowth(sid)
+    if (!saved) return false
+    st.tokens = saved.tokens
+    st.growthQuota = saved.growthQuota
+    st.lineOn = saved.lineOn
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function persistGrowth(ctx, id, st, log) {
+  try {
+    if (!st || typeof st.tokens !== 'number' || !Number.isFinite(st.tokens)) return false
+    const session = ctx && ctx.sessions && typeof ctx.sessions.get === 'function' ? ctx.sessions.get(id) : null
+    const sid = session && typeof session.id === 'string' ? session.id : ''
+    if (!sid) return false
+    const ok = writeGrowth(sid, {
+      tokens: st.tokens,
+      growthQuota: typeof st.growthQuota === 'number' ? st.growthQuota : null,
+      lineOn: st.lineOn === true,
+    })
+    // 落盘失败不能全静默：用户重启后发现"累计又清零了"，日志里至少得能查到原因。
+    // 成功但退到了临时目录也要记：主目录里那份是旧的，只记在这里才看得出真实位置。
+    // 同一状态连续失败/连续退级只记一次，恢复后清标记——坏盘时不能每步刷一条（GLM 回归修复 4）。
+    if (!ok) {
+      if (typeof log === 'function' && st.stateLog !== 'fail') {
+        st.stateLog = 'fail'
+        log('growth-state-write-failed', { agent: id, reason: lastStateFailure() })
+      }
+    } else if (typeof log === 'function') {
+      const fallback = lastStateFallback()
+      if (fallback.fellBack) {
+        if (st.stateLog !== 'tmp') {
+          st.stateLog = 'tmp'
+          log('growth-state-written-to-tmp', { agent: id, reason: fallback.reason })
+        }
+      } else if (st.stateLog) {
+        st.stateLog = ''
+      }
+    }
+    return ok
+  } catch {
+    return false
+  }
+}
+
 function forgetPending(bySignal, byAgent, id, signal) {
   const record = signal ? bySignal.get(signal) : undefined
   if (record && record.agentId === id) bySignal.delete(signal)
@@ -893,6 +988,7 @@ function settleGrowth(ctx, config, state, payload, log) {
   st.growthLamp = false
   // 100% 等于原额，直接回到 null（用配置原额，配置改了也跟着变）。
   st.growthQuota = pct >= 100 ? null : Math.max(1, Math.round(config.notice.growthTokens * (pct / 100)))
+  persistGrowth(ctx, id, st, log)
   log('growth-reset', { agent: id, turn, pct, quota: st.growthQuota })
 }
 
@@ -945,11 +1041,7 @@ function markNextTurn(ctx, state, payload, log) {
   const id = payload.agent && payload.agent.id
   const turn = typeof payload.turn === 'number' ? payload.turn : null
   if (!id || turn === null) return
-  let st = state.get(id)
-  if (!st) {
-    st = newState()
-    state.set(id, st)
-  }
+  const st = ensureState(ctx, state, id)
   if (st.markedTurn === turn + 1) return
   if (lastMarkerTurn(ctx, id) === turn + 1) {
     st.markedTurn = turn + 1
@@ -966,11 +1058,7 @@ function ensureTurnMarker(ctx, state, payload, log) {
   const id = payload.agent && payload.agent.id
   const turn = typeof payload.turn === 'number' ? payload.turn : null
   if (!id || turn === null) return
-  let st = state.get(id)
-  if (!st) {
-    st = newState()
-    state.set(id, st)
-  }
+  const st = ensureState(ctx, state, id)
   if (st.markedTurn === turn) return
   if (lastMarkerTurn(ctx, id) === turn) {
     st.markedTurn = turn
@@ -1064,11 +1152,7 @@ function deliverNotice(ctx, config, state, record, log) {
   const id = record.agentId
   const session = ctx.sessions.get(id)
   if (!session) return
-  let st = state.get(id)
-  if (!st) {
-    st = newState()
-    state.set(id, st)
-  }
+  const st = ensureState(ctx, state, id)
 
   const turn = typeof record.turn === 'number' ? record.turn : st.turn
   const text = noticeText(ctx, config, record, record.count, log)
@@ -1090,6 +1174,8 @@ function deliverNotice(ctx, config, state, record, log) {
     // 增长这条路：记下"哪一轮发的"，下一轮收尾时据此判断模型有没有动手（见 settleGrowth）。
     if (record.reasons.includes('line')) st.lineOn = true
     if (record.reasons.includes('growth')) st.growthPending = turn
+    // 刚把基线移到这次提醒的用量、可能还亮了到线灯：落盘，重启后不用重报一遍。
+    persistGrowth(ctx, id, st, log)
   }
 
   // 叫醒模型立刻压（设计约束）：followup 只是把消息排进 inbox 的 next-turn，
@@ -1347,7 +1433,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         log('compress-rejected', { reason: result.reason, applied: result.applied === true, keys: Object.keys(args || {}) })
         // 回执说"失败"但块其实已经落地（end 补不上那一路）：基线要照常重设，
         // 否则增长触发会把这一批当成"没发生"，下一轮立刻又报增长。
-        if (result.applied === true) resetGrowthBaseline(ctx, agent, config, reminded)
+        if (result.applied === true) resetGrowthBaseline(ctx, agent, config, reminded, log)
         // 多键批里可能"前面的层已经写进去、后面的失败了"：把落盘的层说清楚，
         // 否则模型会整批重发，把已写的层再压一遍。fail() 给的是 partial，不是 results。
         const landed = Array.isArray(result.partial) && result.partial.length
@@ -1376,7 +1462,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       if (mapText) issueFor(ctx, agent, log)
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
       // 增长触发（notice.growthTokens）要等用量爬回压缩前的高度才可能再响——等于报废。
-      resetGrowthBaseline(ctx, agent, config, reminded)
+      resetGrowthBaseline(ctx, agent, config, reminded, log)
       // 开关关着就不登记：登记了也没人消费，等到重开那天全是「已经进过请求」的节点。
       if (config.foldCallRecord !== false) rememberFold(foldQueueFor(foldQueues, agent.id), exec.callId, lines.slice(), callSeq)
       return { text: lines.join('\n') }
@@ -1391,7 +1477,8 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
 // 压缩成功之后把"上一次提醒时的量"重设成现在的量。
 // 不重设的话：基线停在压缩前的高位，压缩后 grew 长期为负，增长触发那个条件
 // 要等用量一路爬回压缩前的高度才可能再响——等于把三个触发条件里的一个废掉。
-function resetGrowthBaseline(ctx, agent, config, state) {
+// 导出是为了让测试直接钉住"先复位指示灯、再落盘"的顺序（审查 0883a196 Major 2）。
+export function resetGrowthBaseline(ctx, agent, config, state, log) {
   try {
     const st = state.get(agent.id)
     if (!st) return
@@ -1413,6 +1500,9 @@ function resetGrowthBaseline(ctx, agent, config, state) {
     st.envBlocked = null
     // 占用掉下来了：到线指示灯要按压缩后的实际比例复位，否则"掉下去又越上来"不再报。
     if (usage && typeof usage.ratio === 'number') st.lineOn = usage.ratio >= config.triggerPct
+    // 落盘必须放在指示灯复位**之后**：以前先落盘再复位，盘上留的是压缩前的 lineOn，
+    // 重启后会吞掉一次到线提醒（审查 0883a196 Major 2）。
+    persistGrowth(ctx, agent.id, st, log)
   } catch {}
 }
 

@@ -3,7 +3,11 @@
 // 只有真跑一遍才会现形（ee1fb7e 就是这么漏过去的）。
 // 跑法：node plugin/test/prestep.test.mjs
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { apply, describeResults, foldPending, receiptLines } from '../index.js'
+import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
 
@@ -918,6 +922,172 @@ await check('区超限与增长同一轮都成立：合并成一条提醒，不�
   assert.match(text, /L1 区已超设计容量/, '区超限要写在同一条里')
   assert.match(text, /又长了/, '增长也要写在同一条里')
   assert.match(text, /允许什么都不压/, '每条提醒都要写明可以不压')
+})
+
+// —— 增长状态落盘：重启不清零（审查 0883a196 Major 1/3）——
+// 这三条必须真跑 pre-step，并且给假会话安上 id、把 DSH_HOME 指到临时目录：
+// 只测 hydrateGrowth/persistGrowth 两个函数钉不住"接线漏了"——审查实测删掉
+// remindIfNeeded 里的 hydrate 调用，旧的 state 17 项 + prestep 59 项仍然全绿。
+
+const scratchHome = () => mkdtempSync(join(tmpdir(), 'ebbing-prestep-state-'))
+const withScratchHome = async (fn) => {
+  const scratch = scratchHome()
+  const saved = process.env.DSH_HOME
+  process.env.DSH_HOME = scratch
+  try {
+    await fn()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+await check('重启后增长累计接着算：基线从盘上回灌，不按当前用量重设', async () => {
+  await withScratchHome(async () => {
+    const session = layeredSession(['L1', 'L1'], 260, 300)
+    session.id = 'session-restart-growth'
+    session.requestContext = () => ({ contextWindow: 100000 })
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } }
+    // 第一次运行：只把基线定下来（300），不提醒
+    const ctx1 = usageCtx(session)
+    apply(ctx1, config)
+    await ctx1.handlers.get('agent/pre-step')(STEP(1), () => {})
+    assert.equal(readGrowth('session-restart-growth') && readGrowth('session-restart-growth').tokens, 300, '首次 pre-step 应把基线落盘')
+    // 长过门槛：300 → 450（+150 ≥ 100）
+    session.used = 450
+    session.seq += 1
+    // 模拟重启：新的 ctx + 新的 apply（内存状态全丢，只能靠盘上那份文件）
+    const ctx2 = usageCtx(session)
+    apply(ctx2, config)
+    const t2 = STEP(2)
+    await ctx2.handlers.get('agent/pre-step')(t2, () => {})
+    await ctx2.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal }, () => {})
+    assert.equal(t2.agent.followups.length, 1, '重启后按旧基线判增长，应该叫醒')
+    assert.match(String(t2.agent.followups[0].content[0].text), /又长了/, '理由应该是增长那条')
+  })
+})
+
+await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不吞提醒）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(900)
+    session.id = 'session-restart-line'
+    // 关掉增长这条线，只看"到线灯"的落盘
+    const config = { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, growthTokens: 0 } }
+    const ctx1 = usageCtx(session)
+    apply(ctx1, config)
+    const t1 = STEP(1)
+    await ctx1.handlers.get('agent/pre-step')(t1, () => {})
+    await ctx1.handlers.get('agent/turn-stopping')({ turn: 1, signal: t1.signal }, () => {})
+    assert.equal(t1.agent.followups.length, 1, '越线先报一次')
+    assert.equal(readGrowth('session-restart-line') && readGrowth('session-restart-line').lineOn, true, '灯亮着要落盘')
+    // 掉回线下：灯灭必须落盘（旧代码只改内存，盘上仍是 true）
+    session.used = 400
+    session.seq += 1
+    const t2 = STEP(2, 1, { agent: t1.agent })
+    await ctx1.handlers.get('agent/pre-step')(t2, () => {})
+    assert.equal(readGrowth('session-restart-line') && readGrowth('session-restart-line').lineOn, false, '掉回线下后盘上必须是灭的')
+    // 模拟重启，再次越线：必须重新报
+    session.used = 900
+    session.seq += 1
+    const ctx2 = usageCtx(session)
+    apply(ctx2, config)
+    const t3 = STEP(3)
+    await ctx2.handlers.get('agent/pre-step')(t3, () => {})
+    await ctx2.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal }, () => {})
+    assert.equal(t3.agent.followups.length, 1, '重启后再次越线必须重新报（灯不能还是亮着）')
+  })
+})
+
+await check('旁路先建了状态（那一步拿不到用量）：下一次仍从盘上回灌，不冲掉旧基线', async () => {
+  await withScratchHome(async () => {
+    // 盘上已有基线 100；第一步拿不到用量，状态会被轮次标记旁路先建出来
+    const { writeGrowth } = await import('../lib/state.js')
+    writeGrowth('session-side-path', { tokens: 100, growthQuota: null, lineOn: false })
+    const session = layeredSession(['L1', 'L1'], 260, 300)
+    session.id = 'session-side-path'
+    session.requestContext = () => ({ contextWindow: 100000 })
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 50 } }
+    const ctx = fakeCtx(session)
+    ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+    apply(ctx, config)
+    await ctx.handlers.get('agent/pre-step')(STEP(1), () => {}) // 没有 tokenMeter → readUsage 拿不到读数
+    // 用量恢复，且相对盘上基线长了 200（≥ 50）。bump seq 让使用量缓存失效（null 也被缓存过）。
+    session.seq += 1
+    ctx.tokenMeter = { measure: () => ({ totalTokens: session.used }) }
+    const t2 = STEP(2)
+    await ctx.handlers.get('agent/pre-step')(t2, () => {})
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal }, () => {})
+    assert.equal(t2.agent.followups.length, 1, '盘上的基线 100 必须还在，增长才成立')
+  })
+})
+
+await check('状态已存在但当时拿不到会话：下一步仍从盘上回灌（existing-state 分支）', async () => {
+  await withScratchHome(async () => {
+    const { writeGrowth } = await import('../lib/state.js')
+    writeGrowth('session-late-session', { tokens: 100, growthQuota: null, lineOn: false })
+    const session = layeredSession(['L1', 'L1'], 260, 300)
+    session.id = 'session-late-session'
+    session.requestContext = () => ({ contextWindow: 100000 })
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 50 } }
+    const ctx = usageCtx(session)
+    const realGet = ctx.sessions.get
+    // 第一步：会话服务暂时拿不到 → 状态由轮次标记旁路建出来（hydrate 失败，tokens 仍为 null）
+    ctx.sessions.get = () => null
+    apply(ctx, config)
+    await ctx.handlers.get('agent/pre-step')(STEP(1), () => {})
+    // 会话恢复：已有的空状态必须补 hydrate 拿回基线 100（旧实现只在新状态分支 hydrate）
+    ctx.sessions.get = realGet
+    const t2 = STEP(2)
+    await ctx.handlers.get('agent/pre-step')(t2, () => {})
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: t2.signal }, () => {})
+    assert.equal(t2.agent.followups.length, 1, 'existing-state 分支必须回灌基线 100，增长才成立')
+  })
+})
+
+await check('基线比当前用量高（宿主 /compact 后重启）：按当前量重设后可再次叫醒', async () => {
+  await withScratchHome(async () => {
+    const { writeGrowth } = await import('../lib/state.js')
+    const session = layeredSession(['L1', 'L1'], 260, 1000)
+    session.id = 'session-shrink-guard'
+    session.requestContext = () => ({ contextWindow: 100000 })
+    writeGrowth('session-shrink-guard', { tokens: 1000, growthQuota: 50, lineOn: false })
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } }
+    const ctx = usageCtx(session)
+    apply(ctx, config)
+    await ctx.handlers.get('agent/pre-step')(STEP(1), () => {})
+    // 压缩/剪枝把用量打回 500：基线要跟着改小，否则 grew 长期为负
+    session.used = 500
+    session.seq += 1
+    await ctx.handlers.get('agent/pre-step')(STEP(2), () => {})
+    assert.equal(readGrowth('session-shrink-guard') && readGrowth('session-shrink-guard').tokens, 500, '基线要按当前用量重设并落盘')
+    assert.equal(readGrowth('session-shrink-guard') && readGrowth('session-shrink-guard').growthQuota, null, '缩水等于没看见的压缩，半额门槛也清掉')
+    // 再长 100：应该按原门槛叫醒（没有 guard 时 grew = 600-1000 = -400，永远不响）
+    session.used = 600
+    session.seq += 1
+    const t3 = STEP(3)
+    await ctx.handlers.get('agent/pre-step')(t3, () => {})
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal }, () => {})
+    assert.equal(t3.agent.followups.length, 1, '基线缩水后必须能重新触发增长')
+  })
+})
+
+await check('用量瞬时归零不把基线压成 0（防下一步凭空报增长）', async () => {
+  await withScratchHome(async () => {
+    const session = layeredSession(['L1', 'L1'], 260, 300)
+    session.id = 'session-zero-guard'
+    session.requestContext = () => ({ contextWindow: 100000 })
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } }
+    const ctx = usageCtx(session)
+    apply(ctx, config)
+    await ctx.handlers.get('agent/pre-step')(STEP(1), () => {})
+    assert.equal(readGrowth('session-zero-guard') && readGrowth('session-zero-guard').tokens, 300, '首次基线落盘')
+    // 读数瞬时归零：shrink guard 的 `usage.used > 0` 必须挡住，不把基线写成 0
+    session.used = 0
+    session.seq += 1
+    await ctx.handlers.get('agent/pre-step')(STEP(2), () => {})
+    assert.equal(readGrowth('session-zero-guard') && readGrowth('session-zero-guard').tokens, 300, '基线不能被瞬时 0 顶掉')
+  })
 })
 
 
