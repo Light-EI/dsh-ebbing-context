@@ -122,6 +122,28 @@ export function describeResults(results) {
   )
 }
 
+// 成功回执的收手提醒：本轮压完就停，不要在同一轮里再发第二次 compress。
+// 用户要求（2026-11-05）：模型会在同一轮里连压多次——每次压缩都要整段替换表层并重算地图，
+// 连压两回只会把同一轮烧两遍；而且一次调用本来就能把还能压的层一起给完。
+export const RECEIPT_STOP_LINE = '本轮压缩已经完成，请在本轮不要继续压缩。'
+
+// 成功回执的正文行：结果行 → 可选说明（剪短、缺轮）→ 刷新后的地图 → 收手提醒。
+// 抽成导出函数是为了能被测试直接钉住（缺口台账：改文案 = 改逻辑，每处文案都要有正向断言）。
+export function receiptLines(results, extras = {}) {
+  const lines = describeResults(results)
+  if (extras.prunedChars > 0) {
+    lines.push(`顺带把超大的工具结果剪短了 ${extras.prunedChars} 个字符（原文仍在日志里，可查回）。`)
+  }
+  const swallowed = Array.isArray(extras.swallowed) ? extras.swallowed : []
+  if (swallowed.length) {
+    lines.push(`这次切点跨过了轮次记录里缺失的 ${swallowed.map((t) => `T${t}`).join('、')}——它们的内容已经一起压进块里，块头标签只写到 to 那一轮。`)
+  }
+  if (extras.mapText) lines.push(extras.mapText)
+  // 收手提醒放在地图之后：否则"可写 to=…"紧跟在"不要继续压缩"后面，两句话会打架。
+  lines.push(RECEIPT_STOP_LINE)
+  return lines
+}
+
 export function apply(ctx, rawConfig = {}) {
   // 老配置项先迁移（forgivePct → growthResetPct、根层的 notifySubagents 挪进 notice）：
   // 宿主保存配置后不会重新 apply，但启动时会，所以这里改一次就够；运行时那层读的也是同一个对象。
@@ -1178,6 +1200,9 @@ function noticeText(ctx, config, record, count, log) {
         '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。'
       : '决定要压时：这次没能生成地图（插件内部出错，先别压，按原计划继续），别凭记忆压——先调一次 context_map 拿到位置再动手；' +
         '如果连 context_map 也读不到，就照实告诉用户这一版没法压，别自己猜轮号。') +
+    // 用户要求（2026-11-05）：一次调用就是一批，别在同一轮里连压多次——
+    // 每次压缩都要整段替换表层并重算地图，连压两回只会把同一轮烧两遍；压完这一轮就收手。
+    '请在一次压缩中完成，不要分多次压缩。' +
     '不压也回一句为什么（例如"还没做完，先留着"），不要沉默，也不要假称压过了。' +
     '压完只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。' +
     mapText
@@ -1337,21 +1362,17 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         return { text: `没能压缩：${result.reason}${landed}` + (mapText ? '\n\n' + mapText : '') }
       }
       log('compress-ok', { keys: result.results.map((r) => r.key), prunedChars: result.prunedChars })
-      const lines = describeResults(result.results)
-      if (result.prunedChars > 0) {
-        lines.push(`顺带把超大的工具结果剪短了 ${result.prunedChars} 个字符（原文仍在日志里，可查回）。`)
-      }
-      // 切点跨过了缺轮：说明一句，免得块头标签（只写到 to）看起来像漏压了内容。
-      const swallowed = result.results.flatMap((r) => (Array.isArray(r.swallowed) ? r.swallowed : []))
-      if (swallowed.length) {
-        lines.push(`这次切点跨过了轮次记录里缺失的 ${swallowed.map((t) => `T${t}`).join('、')}——它们的内容已经一起压进块里，块头标签只写到 to 那一轮。`)
-      }
       // 登记待折叠：真正的替换发生在下一次 pre-step（那时工具返回才存在）。
       // 注意顺序：刷新后的地图必须在 rememberFold **之前**并进 lines，否则它跟着被折掉的结果一起消失——
       // 模型既看不到地图，又以为"地图随结果来了"，下一次照旧位置压，必被拒。
       // 设计稿 §2.7 / §11 要求压缩成功也带刷新后的地图（ae398aa 起就是行为约定）。
       const mapText = fullMap(ctx, agent, config, log)
-      if (mapText) lines.push(mapText)
+      const lines = receiptLines(result.results, {
+        prunedChars: result.prunedChars,
+        // 切点跨过了缺轮：说明一句，免得块头标签（只写到 to）看起来像漏压了内容。
+        swallowed: result.results.flatMap((r) => (Array.isArray(r.swallowed) ? r.swallowed : [])),
+        mapText,
+      })
       if (mapText) issueFor(ctx, agent, log)
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
       // 增长触发（notice.growthTokens）要等用量爬回压缩前的高度才可能再响——等于报废。

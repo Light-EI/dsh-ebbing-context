@@ -49,7 +49,7 @@ function check(name, cond, note) {
 
 const show = (v) => JSON.stringify(v)
 const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
-// 宽字符（CJK 1 字 = 1 token，tokens.js 的 estimateTokens 口径）
+// 宽字符（CJK 0.6 token/字，tokens.js 的 estimateTokens 口径；W(500) 约 300 token）
 const W = (n, ch = '原') => ch.repeat(n)
 // 兼容两种消息形态（宿主工厂 / 降级对象）取正文
 const textOf = (m) => {
@@ -490,8 +490,8 @@ async function case7() {
 
   check('7a · 收益校验拒绝：ok === false', !!(result && result.ok === false), show(result))
   check('7b · 一条事件都没写', session.appends.length === 0, show(session.appends.map((x) => x.type)))
-  // 判据是真实地板（productFloor('l0')=159），不是"值不值得叫醒"的 240：
-  // 说 240 会把"摘要写太长"错归成"原文太少"，让模型去改 to（回归修复robe13）。
+  // 判据是真实地板（productFloor('l0')=153），不是"值不值得叫醒"的 240：
+  // 说 240 会把"摘要写太长"错归成"原文太少"，让模型去改 to（回归修复 probe13）。
   check('7c · 原因说「原文太少」并给出地板而不是提醒门槛 240，也不让人去改摘要',
     typeof (result && result.reason) === 'string'
       && result.reason.includes('原文太少') && result.reason.includes('地板')
@@ -1008,12 +1008,13 @@ async function case19() {
   s.seed.turnStart(1)
   s.seed.node('system/message', sysText('你是助手。'))
   // 两块外来检查点：正文里既没有我们的事件号台账，也没有块头 ev。
+  // 正文给到 500 字（新密度约 300 token），留够改写开销，本用例才能真压成功。
   s.seed.logOnly('compaction/start', { compactionId: 'ic-blind-1', turn: 1 })
-  s.seed.node('user/message', checkpointBlock('', `<compacted-summary>${W(300, '摘')}</compacted-summary>`, 'ic-blind-1'))
+  s.seed.node('user/message', checkpointBlock('', `<compacted-summary>${W(500, '摘')}</compacted-summary>`, 'ic-blind-1'))
   s.seed.logOnly('compaction/summary', { compactionId: 'ic-blind-1' })
   s.seed.logOnly('compaction/end', { compactionId: 'ic-blind-1', turn: 1 })
   s.seed.logOnly('compaction/start', { compactionId: 'ic-blind-2', turn: 1 })
-  s.seed.node('user/message', checkpointBlock('', `<compacted-summary>${W(300, '摘')}</compacted-summary>`, 'ic-blind-2'))
+  s.seed.node('user/message', checkpointBlock('', `<compacted-summary>${W(500, '摘')}</compacted-summary>`, 'ic-blind-2'))
   s.seed.logOnly('compaction/summary', { compactionId: 'ic-blind-2' })
   s.seed.logOnly('compaction/end', { compactionId: 'ic-blind-2', turn: 1 })
 
@@ -1031,7 +1032,7 @@ async function case19() {
   check('19c · 交代盲区的那句话要排在「原文还在」之前', text.indexOf('都没有记录') < text.indexOf('原文还在'), text.slice(-200))
 }
 
-// 用例 24：l1 首块低于地板（实测 116 < 138）时，归因必须是"原文太少"，不能骗模型去改摘要。
+// 用例 24：l1 首块低于地板（116 < 139）时，归因必须是"原文太少"，不能骗模型去改摘要。
 async function case24() {
   const s = fakeSession()
   s.seed.turnStart(1)

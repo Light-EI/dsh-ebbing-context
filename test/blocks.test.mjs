@@ -94,7 +94,7 @@ const fake = {
   currentTurn: 5,
   zones: {
     l0: [],
-    // 用中文正文：ASCII 按 4 字符/token 估，凑不够"最小产物成本"那道关。
+    // 用中文正文：中文按 0.6 token/字估（200 字≈120 token），凑不够"最小产物成本"那道关。
     l1: [{ seq: 1, text: '摘'.repeat(200) }, { seq: 2, text: '摘'.repeat(200) }, { seq: 3, text: '摘'.repeat(200) }],
     l2: [{ seq: 4, text: '摘'.repeat(200) }],
     l3: [],
@@ -816,7 +816,9 @@ const gateZones = (sizesByKey) => {
     nodes: [...l1, ...l2, ...l3, ...l0].map((b) => b.seq),
     messages: [],
     zones: { l1, l2, l3, l0 },
-    messageFor: (s) => ({ role: 'user', content: [{ type: 'text', text: '摘'.repeat(size.get(s) || 0) }] }),
+    // 让每个块正文的"自估价"正好等于 n（新密度：中文 0.6 token/字）：
+    // floor(n / 0.6) 个字乘 0.6 向上取整后仍是 n。用例里的数字因此仍是 token 数。
+    messageFor: (s) => ({ role: 'user', content: [{ type: 'text', text: '摘'.repeat(Math.max(1, Math.floor((size.get(s) || 0) / 0.6))) }] }),
     currentTurn: 99,
   }
 }
@@ -833,10 +835,10 @@ const gateZones = (sizesByKey) => {
   check('L3 单块 117：整区压成一块也盖不住开销 → 不可压', worthCompressing(l3tiny, 'l3') === false)
   const l3ok = gateZones({ l3: [400, 300] })
   check('L3 两块合计 700：可压', worthCompressing(l3ok, 'l3') === true)
-  check('地板：块层 138（会话搜索开）/ 126（关）', productFloor('l1', {}) === 138 && productFloor('l1', { requireSessionQuery: false }) === 126)
-check('地板：l0 多一行交界声明 +21', productFloor('l0', {}) === 159 && productFloor('l0', { requireSessionQuery: false }) === 147)
-check('地板：区间里每张图 +38（关掉会话搜索 +26）', productFloor('l2', {}, 2) === 138 + 76 && productFloor('l2', { requireSessionQuery: false }, 1) === 152)
-check('地板常量与函数一致（改一处漏一处会红）', PRODUCT_FLOOR.blockQuery === 138 && PRODUCT_FLOOR.l0Extra === 21)
+  check('地板：块层 139（会话搜索开）/ 129（关）', productFloor('l1', {}) === 139 && productFloor('l1', { requireSessionQuery: false }) === 129)
+check('地板：l0 多一行交界声明 +14', productFloor('l0', {}) === 153 && productFloor('l0', { requireSessionQuery: false }) === 143)
+check('地板：区间里每张图 +27（关掉会话搜索 +16）', productFloor('l2', {}, 2) === 139 + 54 && productFloor('l2', { requireSessionQuery: false }, 1) === 145)
+check('地板常量与函数一致（改一处漏一处会红）', PRODUCT_FLOOR.blockQuery === 139 && PRODUCT_FLOOR.l0Extra === 14)
 }
 
 console.log(`blocks 断言测试全部通过（${total} 项）`)

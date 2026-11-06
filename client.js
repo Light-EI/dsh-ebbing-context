@@ -52,7 +52,7 @@ window.__ModuleLoader__.load({
       },
       {
         group: '单块上限', label: 'L1 单块上限', path: ['segment', 'l1'], kind: 'number', step: 100, min: 64,
-        detail: '一个 L1 块正文最多多少 token（按等效 token 算：中文 1 字约 1）。超了这次调用会被整批拒绝，拒绝里给出实际值与上限；怎么调整由模型自己判断（换一段更小的范围、或分几次压），不要为了塞进上限删内容。',
+        detail: '一个 L1 块正文最多多少 token（按等效 token 算：中文 1 字约 0.6、英文 1 字约 0.3）。超了这次调用会被整批拒绝，拒绝里给出实际值与上限；怎么调整由模型自己判断（换一段更小的范围、或分几次压），不要为了塞进上限删内容。',
       },
       {
         group: '单块上限', label: 'L2 单块上限', path: ['segment', 'l2'], kind: 'number', step: 100, min: 64,

@@ -3,7 +3,7 @@
 // 只有真跑一遍才会现形（ee1fb7e 就是这么漏过去的）。
 // 跑法：node plugin/test/prestep.test.mjs
 import assert from 'node:assert/strict'
-import { apply, describeResults, foldPending } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines } from '../index.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
 
@@ -242,6 +242,8 @@ await check('turn-stopping：走 followup 把模型叫醒（不是写进表层�
   // 来源标记要用宿主已登记的 kind：Client 会把它渲染成「插件状态更新」卡片；
   // 自造 kind 会落回默认的「收到执行请求」，看着像用户自己发起的请求。
   assert.equal(step.agent.followups[0].source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
+  // 用户要求（2026-11-05）：一次调用就是一批，别在同一轮里连压多次——提醒正文要收住。
+  assert.match(noticeText, /请在一次压缩中完成，不要分多次压缩/, '提醒要明确说"一次压缩完成"')
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
@@ -747,8 +749,9 @@ await check('区超限：浅层为空时深层也不报（这种表层本身不�
 })
 
 await check('增长触发没东西可压：门槛砍到一半、基线前移，压得动时按半个门槛再报', async () => {
-  const session = layeredSession(['L1'], 200, 500)
-  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  // 块要够大才过成本闸门（地板 139 token；260 字≈156 token）。
+  // 窗口放大让区预算不干扰本用例。
+  const session = layeredSession(['L1'], 260, 500)
   session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
@@ -796,8 +799,8 @@ await check('增长触发没东西可压：门槛砍到一半、基线前移，�
 })
 
 await check('增长到量一直压不动：每次只等半个门槛，跨轮继续（不会一次就饿死）', async () => {
-  const session = layeredSession(['L1'], 200, 500)
-  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  const session = layeredSession(['L1'], 260, 500)
+  // 块要够大才过成本闸门（地板 139 token；260 字≈156 token）；窗口放大让区预算不干扰本用例。
   session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100 } })
@@ -838,8 +841,8 @@ await check('增长到量一直压不动：每次只等半个门槛，跨轮继�
 })
 
 await check('本轮决定不压：growthResetPct = 100 时门槛回原额，重新攒满才再报', async () => {
-  const session = layeredSession(['L1', 'L1'], 200, 500)
-  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  const session = layeredSession(['L1', 'L1'], 260, 500)
+  // 块要够大才过成本闸门（地板 139 token；260 字≈156 token）；窗口放大让区预算不干扰本用例。
   session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, growthResetPct: 100 } })
@@ -870,8 +873,8 @@ await check('本轮决定不压：growthResetPct = 100 时门槛回原额，重�
 })
 
 await check('本轮决定不压：growthResetPct = 0 时门槛重设到 1 token，下一轮接着报', async () => {
-  const session = layeredSession(['L1', 'L1'], 200, 500)
-  // 块要够大才过成本闸门（MIN_PRODUCT_TOKENS=150）；窗口放大让区预算不干扰本用例。
+  const session = layeredSession(['L1', 'L1'], 260, 500)
+  // 块要够大才过成本闸门（地板 139 token；260 字≈156 token）；窗口放大让区预算不干扰本用例。
   session.requestContext = () => ({ contextWindow: 100000 })
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, growthTokens: 100, growthResetPct: 0 } })
@@ -1317,6 +1320,16 @@ await check('回执单位：原文区数「条消息」、区块数「个块」�
   assert.equal(lines.length, 2)
   assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
   assert.match(lines[1], /l1 成功：B（3 个块 -> 省 90 token）/)
+})
+
+await check('成功回执：收手提醒在地图之后、是本组最后一行（改文案要红）', async () => {
+  const lines = receiptLines(
+    [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
+    { mapText: '地图第一行\n地图第二行' },
+  )
+  assert.equal(lines[lines.length - 1], '本轮压缩已经完成，请在本轮不要继续压缩。')
+  assert.equal(lines[lines.length - 2], '地图第一行\n地图第二行', '提醒要排在地图之后')
+  assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
 })
 
 await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按事件号能查回来」', async () => {

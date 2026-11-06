@@ -37,7 +37,8 @@ check('宿主把图投影成文本时，文本那部分也计入', () => {
   const ctx = {
     get: () => ({ imageRequestPricing: () => ({ priceImages: () => [{ visualTokens: 1200, text: '中文字' }] }) }),
   }
-  assert.deepEqual(imagePrices(ctx, { provider: 'p', model: 'txt' }, images.slice(0, 1)), [1203])
+  // 3 个汉字 × 0.6 = 1.8，向上取整 2：1200 + 2。
+  assert.deepEqual(imagePrices(ctx, { provider: 'p', model: 'txt' }, images.slice(0, 1)), [1202])
 })
 
 check('价对象缺字段/为 null 时退回 800', () => {
