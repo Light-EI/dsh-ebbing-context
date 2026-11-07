@@ -248,6 +248,11 @@ await check('turn-stopping：走 followup 把模型叫醒（不是写进表层�
   assert.equal(step.agent.followups[0].source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
   // 用户要求（2026-11-05）：一次调用就是一批，别在同一轮里连压多次——提醒正文要收住。
   assert.match(noticeText, /请在一次压缩中完成，不要分多次压缩/, '提醒要明确说"一次压缩完成"')
+  // 用户要求（2026-11-07）：被叫醒只为了压，不能拿它当"继续推进"的许可——
+  // 越过上一轮未决项、或压完转去做别的，都会让未收尾的事悬着。
+  assert.match(noticeText, /压缩专用轮/, '提醒要说明这一轮是压缩专用轮')
+  assert.match(noticeText, /越过上一轮还没收尾的未决项/, '提醒要禁止越过上一轮未决项')
+  assert.match(noticeText, /不要在压缩成功后转做其它任务/, '提醒要禁止压完转做别的任务')
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
