@@ -49,10 +49,25 @@ const config = {
   reservedTokens: 8000,
 }
 const agent = { id: 'a1' }
-const usage = { used: 90000, ratio: 0.9, window: 192000 }
+const usage = { used: 90000, ratio: 90000 / 192000, budget: 192000 }
 const text = renderMap(ctx, agent, config, usage).text
 
 check('地图带每层压力表头（含每区占比）', /区域\s+已用（占可用输入）\s+区上限/.test(text) && /（\d+\.\d%）/.test(text), text.slice(0, 300))
+// 总量必须并排两个数：宿主口径 + 插件自估（2026-11-07 用户要求）。压缩成功回执那一刻宿主的数
+// 还带过渡估算，只报一个数会让人以为真实占用高出一大截；并排显示才能互相核对。
+// 断言连数值一起钉：fixture 的 ratio = used/budget，宿主数、自估数、百分比、窗口四段都得在，
+// 只钉格式的话把宿主/自估对调、或把 ratio 换成别的数都照样绿（复审实测）。
+check('总量并排两个数（宿主口径 + 自估，数值与占比一致）',
+  /^上下文 90,000 token（宿主口径）\/ 自估 [\d,]+（[\d.]+%） \/ 可用输入 192,000（46\.9%）$/.test(text.split('\n')[0]),
+  text.split('\n')[0])
+// 三支边缘：无宿主账单、ratio 缺失、取不到窗口。
+const noUsageText = renderMap(ctx, agent, config, null).text
+check('取不到宿主账单时总量退回自估口径', /插件自估口径/.test(noUsageText.split('\n')[0]), noUsageText.split('\n')[0])
+const noRatioText = renderMap(ctx, agent, config, { used: 90000, budget: 192000, ratio: NaN }).text
+check('宿主 ratio 缺失/NaN 时不渲染百分比段', /\/ 可用输入 192,000$/.test(noRatioText.split('\n')[0]) && !/NaN%|undefined%/.test(noRatioText), noRatioText.split('\n')[0])
+const bare = { surface: { nodes }, deriveMessages: () => messages }
+const noWindowText = renderMap({ ...ctx, sessions: { get: () => bare } }, agent, config, { used: 50000 }).text
+check('取不到窗口时只报两个总量、不渲染可用输入', /^上下文 50,000 token（宿主口径）\/ 自估 [\d,]+$/.test(noWindowText.split('\n')[0]), noWindowText.split('\n')[0])
 check('地图带区上限数值（L1/L2/L3 三行都在）', /L3/.test(text) && /L2/.test(text) && /L1/.test(text))
 check('地图带块表（序号/区/覆盖轮次/token/标题）', /序号?按区各自从 1 起/.test(text) && /覆盖轮次/.test(text), text.slice(0, 400))
 check('地图里能看见块的标题', /git 基线与环境事实/.test(text))
