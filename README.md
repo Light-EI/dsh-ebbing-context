@@ -35,16 +35,22 @@
 
 ## 安装
 
-> npm 暂不上架（名字已占位 `dsh-ebbing-context`）；下面两种方式在真机上装起来过。
+> npm 已发布：`dsh plugin add dsh-ebbing-context`（也可以 `npm install dsh-ebbing-context`）。下面两种方式也仍可用。
 
-**方式一：从源码目录装（推荐）**
+**方式一：从 npm 装（推荐）**
+
+```bash
+dsh plugin add dsh-ebbing-context
+```
+
+**方式二：从源码目录装**
 
 ```bash
 git clone https://github.com/Light-EI/dsh-ebbing-context.git
 dsh plugin add ./dsh-ebbing-context
 ```
 
-**方式二：手动挂到 profile**
+**方式三：手动挂到 profile**
 
 1. 把仓库内容放进 profile 的 `node_modules/dsh-ebbing-context/`
 2. 在 profile 的 `cordis.patch.yml` 里加一行 `dsh-ebbing-context:`（路径写法见 [docs/SPEC.md](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md) 的"目录与开发"）
