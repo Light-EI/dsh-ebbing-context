@@ -3,6 +3,8 @@
 [![test](https://github.com/Light-EI/dsh-ebbing-context/actions/workflows/test.yml/badge.svg)](https://github.com/Light-EI/dsh-ebbing-context/actions/workflows/test.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**中文** | [English](README.en.md)
+
 **模拟记忆衰退的 DSH 分层上下文压缩插件。**
 
 模型自己决定压哪里、自己写摘要；插件只写宿主本来就认识的会话事件，把旧内容一层层降成更粗的表示：
