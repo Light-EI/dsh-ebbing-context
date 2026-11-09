@@ -26,7 +26,7 @@ The older it is, the coarser it gets — but **nothing is ever deleted**. The ra
 
 - **Two tools + one command**: `context_map` (layer structure and usage), `compress` (perform one compaction), `/context-status` (read-only, same map).
 - **Key name = the layer to compress**: `l0` compresses raw text → L1 blocks; `l1` compresses L1 → L2; `l2` compresses L2 → L3; `l3` folds the whole L3 region into one block (the only key without `to`).
-- **`to` must be copied from the map**: `l0` takes a turn number (`T19`); `l1`/`l2` take the 1-based block index within that region. A wrong value is rejected, and the rejection carries a refreshed map.
+- **`to` must be copied from the map**: `l0` takes a turn number (`T` + the real turn from the map); `l1`/`l2` take the 1-based block index within that region. A wrong value is rejected, and the rejection carries a refreshed map.
 - **Cascade**: when compressing a deeper layer, every shallower layer that can still be compressed must be given in the same batch, otherwise the whole batch is rejected (the prefix cache is invalidated only once).
 - **Zero ledger**: no database, no state files; layers are recomputed from the session surface every turn, and a block's identity is its first line `〔L1｜T16–T19｜ev 4121–4390〕title`.
 - **Reminds, never acts**: when usage hits the line, grows a lot, or a layer exceeds its quota, it wakes the model at the end of the turn with a fresh map. It never compresses by itself and never pushes you toward `/compact`.
