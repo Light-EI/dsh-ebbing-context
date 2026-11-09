@@ -146,10 +146,6 @@ try {
     failed += 1
   }
 }
-if (failed) {
-  console.error(`\n${failed} 项失败`)
-  process.exit(1)
-}
 // 这个文件没有统一的 check 计数，写死数字会飘（曾写 15、实际 17）。
 // keepTurns：面板 min=1 拦正常输入，插件侧兜底取 1（用户 2026-11-05 定）。
 // 以前放 0 进来靠 pre-step 的 fatalConfig 每轮抛红，会把整段对话打死。
@@ -170,5 +166,10 @@ pass0: {
 // 曾经用 Number() 强转，"abc" 会静默变成默认的 2，而 validateConfig 一条错都不报）。
 reject('keepTurns 写成字符串', { keepTurns: 'abc' }, 'keepTurns')
 reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
+
+if (failed) {
+  console.error(`\n${failed} 项失败`)
+  process.exit(1)
+}
 
 console.log(`config 断言测试全部通过（${total + 5} 项）`)

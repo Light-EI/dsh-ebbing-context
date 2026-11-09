@@ -140,7 +140,7 @@ export function receiptLines(results, extras = {}) {
     lines.push(`这次切点跨过了轮次记录里缺失的 ${swallowed.map((t) => `T${t}`).join('、')}——它们的内容已经一起压进块里，块头标签只写到 to 那一轮。`)
   }
   if (extras.mapText) lines.push(extras.mapText)
-  // 收手提醒放在地图之后：否则"可写 to=…"紧跟在"不要继续压缩"后面，两句话会打架。
+  // 收手提醒放在地图之后：否则"可写 to 的轮号/序号"紧跟在"不要继续压缩"后面，两句话会打架。
   lines.push(RECEIPT_STOP_LINE)
   return lines
 }
@@ -1284,7 +1284,7 @@ function noticeText(ctx, config, record, count, log) {
     // 让"压完就收手"在真正决定压哪几轮的位置上生效，而不是只出现在提醒正文的说明段。
     parts.join('') +
     (mapText
-      ? '决定要压时：照下面给的位置，一次调用把还能压的层一起给完（级联与填表顺序见 compress 的说明）。' +
+      ? '决定要压时：照下面给的位置，一次调用把要压的层一起给全（深浅同批，区间自己权衡；级联与填表顺序见 compress 的说明）。' +
         '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。'
       : '决定要压时：这次没能生成地图（插件内部出错，先别压，按原计划继续），别凭记忆压——先调一次 context_map 拿到位置再动手；' +
         '如果连 context_map 也读不到，就照实告诉用户这一版没法压，别自己猜轮号。') +
@@ -1385,6 +1385,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       'l0 的产物是 L1 块，l1 的产物是 L2 块，l2 的产物是 L3 块（落在 L3 区尾部，旧 L3 块原样不动），l3 把整个 L3 区压成一块（唯一不写 to 的键）。' +
       '压缩是自下往上长的：哪一层还是空的，就不能压它上面那一层。' +
       '压哪个键，就必须同批把比它浅、且还能压的层一起压掉，只动深层会整批被拒（某层不足 2 块、或只剩被保护的最后几轮时不用给）。' +
+      'to 只写一个锚点：写最小的号 = 只压最老的一段；写最大的号 = 一次把可压段整段压掉（可压段只是"已结束、不在保护圈"，不代表里面的事都做完了），通常不是默认选择——要压就压已经完成的部分，压到第一个还没收尾的轮次之前就停。' +
       '别压还没做完的轮次：那一轮里的事还在进行（目标还没收尾、todo 没打完、还在验证、等你拍板）就先留着——压掉之后你只剩自己写的那几行摘要。' +
       '填表按时间线顺序，最老的一层先写：l3 → l2 → l1 → l0。' +
       '一次调用可以给多个键，一起给只断一次前缀缓存，所以攒够了一次压。' +
@@ -1397,11 +1398,11 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       properties: {
         l3: blockSpec('把整个 L3 区压成一块（不写 to）', false, titleLimit, true),
         l2: blockSpec('压 L2 区最老的一块或几块，到 to 指定的那块为止', true, titleLimit, false,
-          '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。只能从地图里抄。'),
+          '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。从地图「可压位置」里抄一个序号，不能写成区间。'),
         l1: blockSpec('压 L1 区最老的一块或几块，到 to 指定的那块为止', true, titleLimit, false,
-          '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。只能从地图里抄。'),
+          '写并到第几个块：1 = 该区最老的块，最多到「块数 − 1」。从地图「可压位置」里抄一个序号，不能写成区间。'),
         l0: blockSpec('压原文区最旧的一段', true, titleLimit, false,
-          '写到哪一轮为止：如 T19（压到那轮结束，不会切到轮中）；只能写已经结束、且不在 keepTurns 里的轮；只认地图里的 T 号。'),
+          '写到哪一轮为止：从地图「可压位置」里抄一个 T 号（只抄一个，不能写成区间；压到那轮结束，不会切到轮中）；只能写已经结束、且不在 keepTurns 里的轮。'),
       },
     },
     output: textOutput(),
@@ -1447,7 +1448,10 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         // 代价（450–690 token/次）是设计上认过的账，不许拿"省 token"当理由改成紧凑版。
         const mapText = fullMap(ctx, agent, config, log)
         if (mapText) issueFor(ctx, agent, log)
-        return { text: `没能压缩：${result.reason}${landed}` + (mapText ? '\n\n' + mapText : '') }
+        return {
+          text: `没能压缩：${result.reason}${landed}` +
+            (mapText ? '\n\n' + mapText : '\n\n（地图刷新失败：先调 context_map，再按它给的可压位置重试）'),
+        }
       }
       log('compress-ok', { keys: result.results.map((r) => r.key), prunedChars: result.prunedChars })
       // 登记待折叠：真正的替换发生在下一次 pre-step（那时工具返回才存在）。

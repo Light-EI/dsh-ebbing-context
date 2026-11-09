@@ -750,10 +750,6 @@ check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现�
 check('块头能读回「T?–T2」这种下界未知的写法', JSON.stringify(parseHeader('〔L1｜T?–T2｜ev 1–4〕标题').meta.turns) === '[null,2]')
 check('块头能读回「ev 9–12+」这种事件号上界只是下限的写法（写得出就要读得回）', (() => { const m = parseHeader('〔L3｜T1–T2｜ev 9–12+〕标题').meta; return JSON.stringify(m.events) === '[9,12]' && m.eventsOpen === true })())
 
-if (failed) {
-  console.error(`\n${failed} 项失败`)
-  process.exit(1)
-}
 // 回归修复：标记补轮会改写 starts，currentTurn 必须跟着重算——
 // 否则地图说"当前第 N 轮"、而 T{N} 早已结束，最近一整轮压不了。
 {
@@ -841,4 +837,14 @@ check('地板：区间里每张图 +27（关掉会话搜索 +16）', productFloo
 check('地板常量与函数一致（改一处漏一处会红）', PRODUCT_FLOOR.blockQuery === 139 && PRODUCT_FLOOR.l0Extra === 14)
 }
 
+// 2026-11-09：锚点写错时的拒因也不能再让人去抄一个固定示例轮号（与 compress 的 checkShape 同一类坑）。
+const badAnchor = resolveTurnAnchor(zones, '117')
+check('轮号写成纯数字时拒因指向地图、不出现示例轮号',
+  badAnchor.ok === false && badAnchor.reason.includes('地图') && !/T\d/.test(badAnchor.reason), badAnchor.reason)
+
+// 失败判定必须放在文件末尾：以前它被放在中间，后面那批断言失败也不会让进程非零退出。
+if (failed) {
+  console.error(`\n${failed} 项失败`)
+  process.exit(1)
+}
 console.log(`blocks 断言测试全部通过（${total} 项）`)

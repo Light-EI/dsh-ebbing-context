@@ -89,8 +89,17 @@ check('压缩须知：当前轮与进行中步骤绝对不可压，且不许一�
   text.split('\n').filter((l) => /压缩须知|绝对不可压/.test(l)).join(' ⏎ '))
 check('压缩须知：压缩专用轮压完就收手（这句从提醒正文挪到地图须知段）',
   /压缩专用轮：压完就收手/.test(text) && /越过上一轮还没收尾的未决项/.test(text) && /不要在压缩成功后转做其它任务/.test(text))
-check('地图给出 l0 的轮号范围写法', /可写 to=T\d+–T\d+|暂不可用/.test(text))
-check('地图给出 l1/l2 的块序号范围写法', /可写 to=1–\d+|暂不可用/.test(text))
+// 用户要求（2026-11-09）：地图不能再给「可写 to=T124–T130」这种可照抄形态——模型会把它整个抄进 to。
+// 改成「可写 to 的轮号：T124…T130」，并明确「写哪个号就压到哪个号」。
+// 用户裁定（2026-11-09）：不写"没有理由就写最老的号"（没理由就该不压）、不写"没有把握就取小的"
+// （模型没把握时压小的也可能是错的）；规则只说"压已经完成的部分"。
+check('压缩须知：最大号只是上界，要压就压已经完成的部分',
+  /地图列出的最大号只是上界/.test(text) && /要压就压已经完成的部分/.test(text)
+    && !/没有理由就写最老的号/.test(text) && !/没有把握就取小的/.test(text) && !/先压一小段/.test(text))
+check('地图的 to 写法不再给出可照抄的区间（l0 用「可写 to 的轮号：T1…T2」，l1/l2 用「可写 to 的序号：1…N」）',
+  !/可写 to=T\d+–T\d+/.test(text) && !/可写 to=1–\d+/.test(text))
+check('地图给出 l0 的轮号写法', /可写 to 的轮号：T\d+…T\d+|可写 to 的轮号：T\d+（|暂不可用/.test(text))
+check('地图给出 l1/l2 的块序号写法', /可写 to 的序号：\d+…\d+|可写 to 的序号：\d+（|暂不可用/.test(text))
 // 外来块（没有块头）的出身：查不到压缩事务时必须在地图上说明，否则模型只看到"什么都压不动"。
 const ckSession = {
   surface: { nodes: [5, 9000] },
@@ -141,16 +150,16 @@ const longGapText = renderMap(longGapCtx, agent, config, usage).text
 check('缺轮时单独列出「写不得」的轮号', /缺的轮号 T3/.test(longGapText) && /写不得/.test(longGapText), longGapText.slice(0, 600))
 // 回归修复：可写的 to 不能把缺轮号包进去（之前同一行里既写 T2–T3、又说 T3 写不得）。
 // 断言三件事：有可写区间、区间里没有缺轮号、不出现 T2–T2 这种同值区间（回归修复）。
-check('可写区间不含缺轮号（T3 缺 → 上界退到 T2）',
-  /可写 to=T\d+(?:–T\d+)?（/.test(longGapText) && !/可写 to=[^（]*T3/.test(longGapText)
-    && !/可写 to=T(\d+)–T\1/.test(longGapText),
+check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
+  /可写 to 的轮号：T\d+(?:…T\d+)?（/.test(longGapText) && !/可写 to 的轮号：[^（]*T3/.test(longGapText)
+    && !/可写 to 的轮号：T(\d+)…T\1/.test(longGapText),
   longGapText.slice(0, 600))
 // 设计约束 裁定：l0 行的括号里要带上取舍口径，别让"可写"看起来像"该压"。
 // 断言必须按行钉：光钉短语在整张图里出现过，把它挪到"压缩须知"下面测试照样绿（回归修复）。
 {
   const l0Line = longGapText.split('\n').find((l) => l.startsWith('l0')) || ''
   check('l0 行的括号里说明"只压已经收尾的、还在推进的留着"',
-    /可写 to=T\d+(?:–T\d+)?（[^）]*只压已经收尾、结果已落地的内容，还在推进或接下来还要用的留着[^）]*）/.test(l0Line),
+    /可写 to 的轮号：T\d+(?:…T\d+)?（[^）]*只压已经收尾、结果已落地的内容，还在推进或接下来还要用的留着[^）]*）/.test(l0Line),
     l0Line.slice(0, 700))
 }
 
@@ -182,8 +191,8 @@ check('可写区间不含缺轮号（T3 缺 → 上界退到 T2）',
   const keepText = renderMap(oneCtx, agent, { ...config, keepTurns: 2 }, usage).text
   check('F4：keepTurns 把轮次全保住时，原文区仍非空——标记说明行不能跟着消失',
     /暂不可用：keepTurns=2/.test(keepText) && /原文区里每条〔轮次标记〕/.test(keepText), keepText.slice(0, 500))
-  check('只有一个可写轮：写单值 `可写 to=T1（`，不写 T1–T1',
-    /可写 to=T1（/.test(oneText) && !/可写 to=T1–T1/.test(oneText), oneText.slice(0, 400))
+  check('只有一个可写轮：写单值 `可写 to 的轮号：T1（`，不写 T1–T1',
+    /可写 to 的轮号：T1（/.test(oneText) && !/可写 to 的轮号：T1…T1/.test(oneText), oneText.slice(0, 400))
 }
 
 
@@ -231,10 +240,6 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   check('拿不到轮号时仍要说明判不了轮', /拿不到轮号/.test(noTurnText), noTurnText.slice(0, 400))
 }
 
-if (failed) {
-  console.error(`\n${failed} 项失败`)
-  process.exit(1)
-}
 // 成本闸门（用户 2026-11-05 第 2 条）：两层都是小块的 L1 只有"第一块能压"，
 // 而第一块 116 token 盖不住改写开销——地图必须写清原因，不能再给一个照做必被拒的 to。
 {
@@ -258,7 +263,7 @@ if (failed) {
   const tinyText = renderMap(tinyCtx, agent, config, usage).text
   const l1Line = (tinyText.split('\n').find((line) => line.startsWith('l1 ')) || '')
   check('L1 只有小块时地图写清"盖不住改写开销"', /盖不住一块的最小产物成本/.test(l1Line), l1Line)
-  check('L1 只有小块时不再给出可写 to', !/可写 to=/.test(l1Line), l1Line)
+  check('L1 只有小块时不再给出可写 to', !/可写 to 的序号/.test(l1Line), l1Line)
   // 可压的时候必须把"还剩多少预算留给摘要+标题"写出来（设计意图回归修复：150 当阈值两头都漏，
   // 改成"给两端的事实"）。
   {
@@ -272,8 +277,50 @@ if (failed) {
     const bigSession = { surface: { nodes: bigNodes }, deriveMessages: () => bigMsgs, requestContext: () => ({ contextWindow: 200000 }), requestHeader: () => ({ config: { maxTokens: 8000 } }) }
     const bigCtx = { sessions: { get: () => bigSession }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }] }) } : null) }
     const bigLine = (renderMap(bigCtx, agent, config, usage).text.split('\n').find((line) => line.startsWith('l1 ')) || '')
-    check('L1 可压时写出"摘要+标题合计不超过 N token"', /摘要\+标题合计不超过 \d+ token 才过收益校验/.test(bigLine), bigLine)
+    check('L1 可压时写出"摘要+标题合计不超过 N token"', /摘要\+标题合计不超过 \d+ token 才过收益校验/.test(bigLine) && !/摘要正文不超过/.test(bigLine), bigLine)
   }
+  // 收益预算超过产物层单块上限时，必须把上限也写出来：压 l1 的产物是 L2 块、上限 2000，
+  // 只写"≤ 5406"会给出一个模型根本写不出来的数（2026-11-09 用户问"会不会诱导一压到底"时核出）。
+  {
+    const hugeBlock = (i) => ({
+      role: 'user',
+      source: { kind: 'compact-checkpoint' },
+      content: [{ type: 'text', text: `〔L1｜T${i * 2 + 1}–T${i * 2 + 2}｜ev ${10 + i}–${20 + i}〕块${i + 1}\n` + '摘'.repeat(2000) }],
+    })
+    const hugeMsgs = [{ role: 'system', content: [{ type: 'text', text: 'sys' }] }, hugeBlock(0), hugeBlock(1), hugeBlock(2)]
+    const hugeSession = { surface: { nodes: [1, 2, 3, 4] }, deriveMessages: () => hugeMsgs, requestContext: () => ({ contextWindow: 200000 }), requestHeader: () => ({ config: { maxTokens: 8000 } }) }
+    const hugeCtx = { sessions: { get: () => hugeSession }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }] }) } : null) }
+    const hugeLine = (renderMap(hugeCtx, agent, config, usage).text.split('\n').find((line) => line.startsWith('l1 ')) || '')
+    check('收益预算超过产物层上限时，地图把单块上限也写出来',
+      /摘要正文不超过 2000（L2 单块上限）/.test(hugeLine) && /摘要\+标题合计不超过 \d+ token 才过收益校验/.test(hugeLine), hugeLine)
+  }
+  // to=1 的预算同样要按产物层上限截断（qwen 快审 1163c1a 的 Major：首块很大时给 2390，实际 L2 上限 2000）。
+  {
+    const bigFirst = (i, n) => ({
+      role: 'user',
+      source: { kind: 'compact-checkpoint' },
+      content: [{ type: 'text', text: `〔L1｜T${i * 2 + 1}–T${i * 2 + 2}｜ev ${10 + i}–${20 + i}〕块${i + 1}\n` + '摘'.repeat(n) }],
+    })
+    const msgs = [{ role: 'system', content: [{ type: 'text', text: 'sys' }] }, bigFirst(0, 4200), bigFirst(1, 200), bigFirst(2, 100)]
+    const session = { surface: { nodes: [1, 2, 3, 4] }, deriveMessages: () => msgs, requestContext: () => ({ contextWindow: 200000 }), requestHeader: () => ({ config: { maxTokens: 8000 } }) }
+    const ctx = { sessions: { get: () => session }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }] }) } : null) }
+    const line = (renderMap(ctx, agent, config, usage).text.split('\n').find((l) => l.startsWith('l1 ')) || '')
+    check('to=1 的预算也按产物层上限截断（首块很大时不承诺写不出来的数）',
+      /to=1 只并最老的一块（\d+ token，够改写开销；摘要\+标题 ≤ 2000）/.test(line) && /摘要正文不超过 2000/.test(line), line)
+  }
+}
+
+// 只有 2 块、首块够改写开销：可写序号只有一个（1），不能渲染成「1…1」（qwen 快审 15d6868/2f45f84 Minor）。
+{
+  const msgs = [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '〔L1｜T1–T2｜ev 3–4〕块1\n' + '摘'.repeat(400) }] },
+    { role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '〔L1｜T3–T4｜ev 5–6〕块2\n' + '摘'.repeat(400) }] },
+  ]
+  const sess = { surface: { nodes: [1, 2, 3] }, deriveMessages: () => msgs, requestContext: () => ({ contextWindow: 200000 }), requestHeader: () => ({ config: { maxTokens: 8000 } }) }
+  const c = { sessions: { get: () => sess }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }] }) } : null) }
+  const line = (renderMap(c, agent, config, usage).text.split('\n').find((l) => l.startsWith('l1 ')) || '')
+  check('只有 2 块时可写序号写单值 1，不写 1…1', /可写 to 的序号：1（该区共 2 块/.test(line) && !/1…1/.test(line), line)
 }
 
 // 只有 2 块且首块不够地板时：必须走"暂不可用"，绝不能拼出 `to=2–1`（回归修复）。
@@ -302,7 +349,7 @@ if (failed) {
   const sess = { surface: { nodes }, deriveMessages: () => msgs, requestContext: () => ({ contextWindow: 200000 }), requestHeader: () => ({ config: { maxTokens: 8000 } }) }
   const c = { sessions: { get: () => sess }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 9 }, { turn: 2, seq: 49 }, { turn: 3, seq: 99 }] }) } : null) }
   const line = (renderMap(c, agent, config, usage).text.split('\n').find((l) => l.startsWith('l1 ')) || '')
-  check('首块不够开销时表头写「可写 to=2–N」而不是 to=1–N', /可写 to=2–2（to=1 单独不可行）/.test(line), line)
+  check('首块不够开销时表头写「可写 to 的序号：2」而不是 1…2', /可写 to 的序号：2（to=1 单独不可行）/.test(line) && !/2…2/.test(line), line)
   check('并且逐个 to 说清 to=1 单独写必被拒', /to=1 只并最老的一块/.test(line) && /必被拒/.test(line), JSON.stringify(line))
 }
 // 240 是提醒门槛，不是压不动的硬边界：地图不能说「压完不会比原样更小」。
@@ -316,6 +363,11 @@ if (failed) {
   const c = { sessions: { get: () => sess }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 6 }, { turn: 2, seq: 7 }] }) } : null) }
   const line = (renderMap(c, agent, config, usage).text.split('\n').find((l) => l.startsWith('l0 ')) || '')
   check('l0 走叫醒门槛口径：说「门槛」而不是断言「压完不会更小」', /叫醒门槛/.test(line) && !/压完不会比原样更小/.test(line), line)
+}
+
+if (failed) {
+  console.error(`\n${failed} 项失败`)
+  process.exit(1)
 }
 
 console.log(`map 断言测试全部通过（${total} 项）`)

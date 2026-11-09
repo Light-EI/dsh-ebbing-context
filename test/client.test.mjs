@@ -1,4 +1,5 @@
 // 配置页文案与默认值的一致性断言（"改文案等于改逻辑"：面板里写死的数字必须跟 DEFAULTS 同源）。
+// 另加双语覆盖断言：每个字段、每组、每条面板文案都必须有英文对应，且渲染确实用到它们。
 // 跑法：node plugin/test/client.test.mjs
 import { readFileSync } from 'node:fs'
 import { DEFAULTS } from '../lib/config.js'
@@ -30,8 +31,29 @@ check('单块超限的说明不教「分几次压」', !text.includes('分几次
 // 原文事件仍在会话日志里、可按事件号读回；说「永久丢失」与取回口径矛盾。
 check('页面注意不写「细节永久丢失」', !text.includes('永久丢失'))
 
+// —— 双语覆盖（2026-11-09） ——
+// 面板是「中文为主、英文为辅」：每个字段的中文标签/说明、每组名、面板级文案都要有英文对应。
+const count = (re) => (text.match(re) || []).length
+// 字段数用 path 数组数认（label: 之类还会撞上面板按钮的 detail 文案，不能直接数）。
+const fieldCount = count(/\bpath: \[/g)
+const groupNames = [...text.matchAll(/\bgroup: '([^']+)'/g)].map((m) => m[1])
+const groupNamesEn = [...text.matchAll(/\bgroupEn: '([^']+)'/g)].map((m) => m[1])
+const groupPairs = new Set(groupNames.map((g, i) => g + ' => ' + groupNamesEn[i]))
+const labelEn = count(/\blabelEn: '/g)
+const detailEn = count(/\bdetailEn: '/g)
+const groupEn = count(/\bgroupEn: '/g)
+check('每个字段都有英文标签', fieldCount > 0 && labelEn === fieldCount, `fields ${fieldCount} / labelEn ${labelEn}`)
+check('每个字段都有英文说明', fieldCount > 0 && detailEn === fieldCount, `fields ${fieldCount} / detailEn ${detailEn}`)
+check('每一组都有英文组名', groupNames.length === fieldCount && groupPairs.size === new Set(groupNames).size,
+  `字段 ${groupNames.length} / 组对 ${groupPairs.size} / 组 ${new Set(groupNames).size}`)
+check('面板级文案有英文块', text.includes("title: 'Context compaction'") && text.includes('hint:'), '缺少 TEXT.en')
+check('渲染确实用了英文标签与说明', text.includes('item.labelEn') && text.includes('item.detailEn'))
+check('按钮/横幅文案用英文 TEXT.en', text.includes('TEXT.en.save') && text.includes('TEXT.en.note') && text.includes('TEXT.en.refused'))
+// 英文侧同样不能残留旧默认数（整文件检查已在上面做过，这里再钉一次英文块里的增长阈值）。
+check('英文说明里的增长阈值与默认值同源', text.includes(`an original threshold of ${growth}`) && text.includes(`another ${reset} tokens`))
+
 if (failed) {
   console.error(`client 文案断言 ${failed} 项失败`)
   process.exit(1)
 }
-console.log('client 文案断言全部通过（5 项）')
+console.log('client 文案与双语断言全部通过（12 项）')

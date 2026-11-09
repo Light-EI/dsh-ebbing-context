@@ -129,10 +129,6 @@ for (const bad of [null, 0, '', true, undefined]) {
   })
 }
 
-if (failed) {
-  console.error(`\n${failed} 项失败`)
-  process.exit(1)
-}
 check('暂时拿不到价不缓存：llm 稍后就绪时仍能拿到真实价（全代码逻辑审核 7）', () => {
   let ready = false
   const ctx = {
@@ -146,5 +142,10 @@ check('暂时拿不到价不缓存：llm 稍后就绪时仍能拿到真实价（
   ready = true
   assert.deepEqual(imagePrices(ctx, { provider: 'p', model: 'late' }, images), [1234, 1234])
 })
+
+if (failed) {
+  console.error(`\n${failed} 项失败`)
+  process.exit(1)
+}
 
 console.log(`imageprice 断言测试全部通过（${total} 项）`)

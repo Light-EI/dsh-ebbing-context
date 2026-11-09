@@ -4,7 +4,8 @@
 // 块是按块头分层的，块头层级与位置不一致时，l1/l2/l3 的第一块到最后一块之间
 // 可能夹着原文甚至当前轮。这里直接用假 zones 喂样例，不碰宿主。
 
-import { impureRange, imageLedger, boundaryLine } from '../lib/compress.js'
+import { readFileSync } from 'node:fs'
+import { impureRange, imageLedger, boundaryLine, checkShape } from '../lib/compress.js'
 
 let total = 0
 let failed = 0
@@ -121,6 +122,42 @@ check('交界行跳过空轮：T18 才有原文时写 T18 而不是 T18 之外�
 const proseLedger = imageLedger({ messageFor: (seq) => (seq === 60 ? { content: [{ type: 'text', text: '笔记：〔这块压掉了 3 张图片（事件号 5、6、7）〕' }] } : null) }, [60])
 check('正文里引用的台账句不算（没有块头就不接手）', proseLedger.count === 0 && proseLedger.line === '', JSON.stringify(proseLedger))
 
+// 2026-11-09 用户实测踩到的坑：漏写 to 时，拒绝文案把参数说明里的格式示例 T19 当成
+// "轮锚点"念出来，看起来像在要求写 T19。最终口径：拒绝只指向地图里的真实轮号，且不出现任何示例轮号。
+const missL0 = checkShape({ l0: { title: 't', summary: 's' } })
+check('l0 漏写 to 的拒绝只指向地图、不出现任何示例轮号',
+  missL0.ok === false && missL0.reason.includes('地图') && !missL0.reason.includes('T19') && !/T\d/.test(missL0.reason),
+  missL0.reason)
+const missL1 = checkShape({ l1: { title: 't', summary: 's' } })
+check('l1 漏写 to 的拒绝说块序号、指向地图',
+  missL1.ok === false && missL1.reason.includes('块序号') && missL1.reason.includes('地图'), missL1.reason)
+const numTo = checkShape({ l0: { title: 't', summary: 's', to: 117 } })
+check('to 写成数字时拒绝并解释字符串写法', numTo.ok === false && numTo.reason.includes('字符串'), numTo.reason)
+
+// 参数说明每轮都发，里面若写死一个示例轮号，比拒绝文案更容易被模型照抄（2026-11-09 用户追问后的收紧）。
+const schemaSrc = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+check('compress 的 to 参数说明不写死示例轮号、且要求只抄一个号', !schemaSrc.includes('如 T19') && schemaSrc.includes('地图「可压位置」里抄一个 T 号') && schemaSrc.includes('不能写成区间'))
+// 用户裁定（2026-11-09）：可压段 = 已结束、不在保护圈，不等于里面的工作做完了；写最大号前要说清这层区别。
+check('compress 描述说明可压段不等于已完成', schemaSrc.includes('可压段只是"已结束、不在保护圈"') && schemaSrc.includes('不代表里面的事都做完了'))
+
+// 参数不是对象时的形状示例同样不能写死一个可被照抄的轮号。
+const shapeHint = checkShape(null)
+check('参数形状示例不写死轮号、指向地图', shapeHint.ok === false && !/T19/.test(shapeHint.reason) && shapeHint.reason.includes('地图'), shapeHint.reason)
+// 地图里「可写 to=T99–T102 / 1–6」是可选范围，不是让照抄整段区间；另一个会话的模型实测抄了区间。
+const rangeL0 = checkShape({ l0: { title: 't', summary: 's', to: 'T99–T102' } })
+check('l0 的 to 写成区间时拒因直接说该写哪个',
+  rangeL0.ok === false && rangeL0.reason.includes('区间') && rangeL0.reason.includes('T102'), rangeL0.reason)
+const rangeL1 = checkShape({ l1: { title: 't', summary: 's', to: '1–6' } })
+check('l1 的 to 写成区间时拒因直接说该写哪个',
+  rangeL1.ok === false && rangeL1.reason.includes('区间') && rangeL1.reason.includes('6'), rangeL1.reason)
+// 地图现在的主形态是省略号（T124…T130 / 1…8）：区间守卫必须认识它，否则拒因退化成泛泛的「收到的是 …」。
+const ellL0 = checkShape({ l0: { title: 't', summary: 's', to: 'T124…T130' } })
+check('l0 抄地图的省略号区间时拒因直接说该写 T130',
+  ellL0.ok === false && ellL0.reason.includes('区间') && ellL0.reason.includes('T130'), ellL0.reason)
+const ellL1 = checkShape({ l1: { title: 't', summary: 's', to: '1…8' } })
+check('l1 抄地图的省略号区间时拒因直接说该写 8',
+  ellL1.ok === false && ellL1.reason.includes('区间') && ellL1.reason.includes('8'), ellL1.reason)
+check('单个轮号仍然放行', checkShape({ l0: { title: 't', summary: 's', to: 'T102' } }).ok === true)
 if (failed !== 0) process.exitCode = 1
 
 console.log(failed === 0 ? `\ncompress 断言测试全部通过（${total} 项）` : `\ncompress 断言测试失败 ${failed} / ${total}`)
