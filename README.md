@@ -64,13 +64,13 @@ dsh plugin add ./dsh-ebbing-context
 
 1. 打开 profile 的 `cordis.patch.yml`，删掉 `dsh-ebbing-context` 那一节（包括面板里改过的 `config`）。不删的话，下一次启动会因为"patch 指向的条目不存在"在 stderr 刷一条警告——不会坏，但会一直刷。
 2. 日志在 `$DSH_HOME/logs/ebbing-context.log`（滚动时还有 `.1` / `.2`），卸载不会自动删，确认不需要排查后手动删掉即可。
-**建议关掉宿主自带的自动压缩**（`compaction-basic` 的 `auto`，默认 80% 触发）。它一旦触发会把多层摘要重新拍平，细节永久丢失。插件照样能压，只是效果打折。关的位置取决于你的安装方式与预设。
+**建议关掉宿主自带的自动压缩**（`compaction-basic` 的 `auto`，默认 80% 触发）。它一旦触发会把多层摘要重新拍平，分层结构就没了（原文还在会话日志里，可按事件号读回）。插件照样能压，只是效果打折。关的位置取决于你的安装方式与预设。
 
 ---
 
 ## 配置
 
-共 17 项（`triggerPct`、`keepTurns`、`pruneFirst`、`foldCallRecord`、`requireSessionQuery`、`reservedTokens`、`budget.*`、`segment.*`、`title.maxTokens`、`notice.*`），在插件面板里改，改完点「保存」才生效。
+共 17 项（`triggerPct`、`keepTurns`、`pruneFirst`、`foldCallRecord`、`requireSessionQuery`、`reservedTokens`、`budget.*`、`segment.*`、`title.maxTokens`、`notice.*`），在系统设置 →「EC上下文设置」（英文环境为 Ebbing Context）或插件行详情页里改，改完点「保存」才生效。
 
 默认值、含义与拒绝规则见 [docs/SPEC.md 第 6 节](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md#6-配置17-项)。
 

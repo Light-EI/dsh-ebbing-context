@@ -64,13 +64,13 @@ After installing, confirm three things: the plugin card shows **running**, both 
 
 1. Open the profile's `cordis.patch.yml` and delete the `dsh-ebbing-context` section (including any `config` you changed in the panel). If you leave it, every start prints a warning on stderr about a patch pointing at a missing entry — harmless, but it keeps printing.
 2. The log lives at `$DSH_HOME/logs/ebbing-context.log` (plus `.1` / `.2` when rotated). Uninstalling does not delete it; remove it manually once you no longer need it for troubleshooting.
-**Recommended: turn off the host's built-in auto-compaction** (`compaction-basic`'s `auto`, triggered at 80% by default). Once it fires it re-flattens the layered summaries and detailed content is permanently lost. The plugin still compresses, just with a discount. Where to turn it off depends on your install method and preset.
+**Recommended: turn off the host's built-in auto-compaction** (`compaction-basic`'s `auto`, triggered at 80% by default). Once it fires it re-flattens the layered summaries and the layered structure is gone (the original text is still in the session log and can be read back by event number). The plugin still compresses, just with a discount. Where to turn it off depends on your install method and preset.
 
 ---
 
 ## Configuration
 
-17 items (`triggerPct`, `keepTurns`, `pruneFirst`, `foldCallRecord`, `requireSessionQuery`, `reservedTokens`, `budget.*`, `segment.*`, `title.maxTokens`, `notice.*`), edited in the plugin panel; changes take effect only after you click "Save".
+17 items (`triggerPct`, `keepTurns`, `pruneFirst`, `foldCallRecord`, `requireSessionQuery`, `reservedTokens`, `budget.*`, `segment.*`, `title.maxTokens`, `notice.*`), edited in Settings → Ebbing Context (the dedicated settings page) or the plugin row's detail page; changes take effect only after you click "Save".
 
 Defaults, meanings and rejection rules are in [docs/SPEC.md section 6](https://github.com/Light-EI/dsh-ebbing-context/blob/main/docs/SPEC.md#6-配置17-项) (Chinese).
 
