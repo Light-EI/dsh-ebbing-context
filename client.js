@@ -1,23 +1,22 @@
 // 浏览器侧：在「插件」面板的这个 bundle 页里画配置表单。
 // 保存走宿主给的 form.mutate（一次提交 = 一个 revision = 一次校验），写回 profile 的 cordis.patch.yml。
 // 这里不做任何读文件、不调用模型；只负责把可设置项画出来。
-// 界面双语：中文为主、英文为辅，两种语言同时显示（不跟随宿主 locale）。
+// 界面语言跟随宿主：中文环境只显示中文、英文环境只显示英文（两套文案都要维护，见维护手册 §1.30）。
 
 window.__ModuleLoader__.load({
   id: 'dsh-ebbing-context',
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useState, useEffect } = React
+    const { useState, useEffect, useMemo } = React
 
     const TEXT = {
       zh: {
-        title: '上下文压缩',
+        title: 'EC上下文设置',
         hint: '改完点最下面的「保存」；离开页面不保存。',
         loading: '正在读取配置…',
         unavailable: '当前客户端读不到这个插件的配置。',
         readonly: '当前 profile 不允许写入配置。',
-        noForm: '这个插件没有声明可编辑的配置。',
         // 宿主侧插件没启动时，面板拿不到 form，页面会永远停在「正在读取配置…」。
         // 那种情况下必须有一句能指向原因的话，否则用户只看到一片空白。
         late: '一直停在这里，说明宿主侧的插件没有启动起来。DSH 日志里会有一条加载错误（搜 import），插件卡片的状态也会停在「未运行」而不是「运行中」。',
@@ -38,12 +37,11 @@ window.__ModuleLoader__.load({
         note: '使用注意：如果这套 DSH 开着自带的自动压缩（compaction-basic 的自动压缩，默认在上下文用到约 80% 时自己触发），建议关掉它。它一旦触发，会把这里的多层摘要重新拍平成一段总摘要，分层结构就没了——详细内容要从会话日志里按事件号翻回来，模型不会再看到这些块；插件本身不受影响、照常能压，但效果会打折扣。要关的是「自动压缩」这个行为（通常是一个 auto 之类的开关，或直接停用那个插件），不关也行、只是效果打折。具体在哪一行、怎么改取决于你的安装方式与预设，插件不会替你改宿主配置。不想自己找的话，可以把这句发给你的助手或模型：「帮我关掉 DeepSeek Harness 自带的自动压缩（compaction-basic 的 auto），改完告诉我你动了哪个文件、怎么改回去」，让它去查；也可以先问问它这个功能是做什么的再决定。',
       },
       en: {
-        title: 'Context compaction',
+        title: 'Ebbing Context',
         hint: 'Click "Save" at the bottom when done; leaving this page discards changes.',
         loading: 'Reading configuration…',
         unavailable: 'This client cannot read this plugin\'s configuration.',
         readonly: 'This profile does not allow configuration writes.',
-        noForm: 'This plugin declares no editable configuration.',
         late: 'Stuck here means the host-side plugin did not start. The DSH log will contain a load error (search for "import"), and the plugin card will stay at "not running" instead of "running".',
         save: 'Save',
         saving: 'Saving…',
@@ -58,6 +56,19 @@ window.__ModuleLoader__.load({
         note: 'Note: if this DSH installation has the host\'s built-in auto-compaction enabled (compaction-basic\'s auto, triggered by default at about 80% of the context), turning it off is recommended. Once it fires it re-flattens these layered summaries into one big summary and the layered structure is gone — details would have to be read back from the session log by event number, and the model will not see these blocks any more. The plugin itself is unaffected and still compresses, just with a discount. What you want to turn off is the "auto-compaction" behavior (usually an auto switch, or simply disabling that plugin); leaving it on is fine too, just with the discount. Which line to change and how depends on your install method and preset — the plugin will not touch host configuration for you. If you would rather not hunt for it, send this to your assistant or model: "Turn off DeepSeek Harness\'s built-in auto-compaction (compaction-basic\'s auto), and tell me which file you changed and how to revert it", and let it look; you can also ask what the feature does first and then decide.',
       },
     }
+
+    // 设置面板里的标题跟宿主语言走：中文「EC上下文设置」、英文「Ebbing Context」。
+    // 只认一个判据（宿主 locale 的 active），正文与标题不会分叉；拿不到 locale 服务时退回中文。
+    let localeApi = null // 用来读 active、订阅语言切换；在 apply 里从 ctx.get('locale') 取
+    const activeLocale = () => {
+      try {
+        const snap = localeApi && typeof localeApi.getLocale === 'function' ? localeApi.getLocale() : null
+        return snap && snap.active ? String(snap.active) : 'zh'
+      } catch {
+        return 'zh'
+      }
+    }
+    const pageTitle = () => (activeLocale().startsWith('zh') ? TEXT.zh.title : TEXT.en.title)
 
     // 每一项：分组、标签、路径、类型、范围、详情（中英各一份，行为完全一致）
     const FIELDS = [
@@ -107,7 +118,7 @@ window.__ModuleLoader__.load({
         detailEn: 'A second path besides the usage line: remind once the session has grown by this many tokens since the last reminder, even before the total hits the line. 0 disables only this path (the usage line and per-layer quota still remind). If the threshold is reached but no layer can be compressed, the threshold is halved and the baseline moves forward, then another half-threshold of growth re-evaluates.',
       },
       {
-        group: '提醒', groupEn: 'Reminders', label: '不压之后门槛重设到原额的百分比', labelEn: 'Threshold reset after a declined reminder (%)', path: ['notice', 'growthResetPct'], kind: 'number', step: 10, min: 0, max: 100,
+        group: '提醒', groupEn: 'Reminders', label: '模型主动拒绝之后门槛重设到原额的百分比', labelEn: 'Threshold reset after the model declines (%)', path: ['notice', 'growthResetPct'], kind: 'number', step: 10, min: 0, max: 100,
         detail: '增长提醒发出去之后，模型如果决定这一轮不压（内容还没做完、或者比较重要），下一个门槛就按原额的百分之多少重设。40（默认）= 原额 65000 的话，再长 26000 才重新触发；100 = 全额重攒；0 = 门槛降到 1 token，下一轮只要再长一点就重新触发。只影响「又长了」这条触发，不影响到线提醒。增长到量但一层都压不动时走另一条路：门槛固定降到一半、基线前移，再长半个门槛重新判一次，直到某次真压得动为止。',
         detailEn: 'After a growth reminder goes out, if the model decides not to compress this turn (content unfinished or important), the next threshold is reset to this percentage of the original. 40 (default) = with an original threshold of 65000, another 26000 tokens are needed to trigger again; 100 = save the full amount again; 0 = the threshold drops to 1 token, so the next bit of growth triggers again. Only affects the "grew again" path, not the usage line. When growth has occurred but no layer can be compressed, another path applies: the threshold halves and the baseline moves forward, re-evaluated every half-threshold until a compaction actually succeeds.',
       },
@@ -148,6 +159,11 @@ window.__ModuleLoader__.load({
       },
     ]
 
+    // 设置面板左侧导航的独立页要读写的命名空间 = profile 里 Loader 行的入口 id。
+    // 不是包名、也不是「插件」页的 slot key（`<包名>#<行 id>`）；这条 id 写在
+    // dsh.bundle.patch.yml 的 insert 行里，和插件行 id 相同。改安装方式时这里要跟着改。
+    const CONFIG_NS = 'dsh-ebbing-context'
+
     function readPath(obj, path) {
       let cur = obj
       for (const k of path) {
@@ -168,9 +184,7 @@ window.__ModuleLoader__.load({
       borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
     }
     const labelStyle = { fontSize: '13px', fontWeight: 600, lineHeight: '20px' }
-    const labelEnStyle = { fontSize: '12px', fontWeight: 400, opacity: 0.55 }
     const detailStyle = { fontSize: '12px', opacity: 0.7, marginTop: '6px', lineHeight: '18px', maxWidth: '640px' }
-    const detailEnStyle = { fontSize: '11px', opacity: 0.5, marginTop: '4px', lineHeight: '17px', maxWidth: '640px' }
     const inputStyle = {
       width: '104px',
       padding: '4px 8px',
@@ -183,7 +197,6 @@ window.__ModuleLoader__.load({
       outline: 'none',
     }
     const groupStyle = { fontSize: '12px', fontWeight: 600, opacity: 0.55, marginTop: '18px', marginBottom: '2px' }
-    const groupEnStyle = { fontWeight: 400, opacity: 0.75 }
     // 使用注意：常驻、不折叠、不和错误横幅抢位置——它讲的是"会让插件效果打折"的既有事实。
     const noteStyle = {
       fontSize: '12px',
@@ -196,7 +209,6 @@ window.__ModuleLoader__.load({
       background: 'color-mix(in srgb, currentColor 5%, transparent)',
       opacity: 0.85,
     }
-    const noteEnStyle = { fontSize: '11px', lineHeight: '17px', marginTop: '6px', opacity: 0.65 }
     const linkStyle = {
       fontSize: '12px', opacity: 0.7, background: 'none', border: 'none',
       padding: 0, marginLeft: '8px', cursor: 'pointer', color: 'inherit', textDecoration: 'underline',
@@ -221,13 +233,6 @@ window.__ModuleLoader__.load({
       border: '1px solid ' + (kind === 'error' ? 'color-mix(in srgb, #d33 45%, transparent)' : 'color-mix(in srgb, currentColor 18%, transparent)'),
       background: kind === 'error' ? 'color-mix(in srgb, #d33 10%, transparent)' : 'color-mix(in srgb, currentColor 5%, transparent)',
     })
-    const bannerEnStyle = { fontSize: '11px', lineHeight: '17px', marginTop: '3px', opacity: 0.7 }
-
-    // 两块文字（中文在上、英文在下）。用于长说明、按钮提示、错误横幅。
-    const biText = (zhText, enText, enStyle) => h('div', null,
-      h('div', null, zhText),
-      h('div', { style: { marginTop: '2px', ...(enStyle || { opacity: 0.6 }) } }, enText),
-    )
 
     function ConfigPage(props) {
       const { view, form } = props
@@ -237,12 +242,23 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       // 「宿主侧根本没起来」和「配置还在路上」在界面上长得一样，靠时间把它们分开。
       const [late, setLate] = useState(false)
+      // 宿主语言切换时重画标题（「插件」页那一份没有 locale 注入，只能自己订阅）。
+      const [, bumpLocale] = useState(0)
+      useEffect(() => {
+        if (!localeApi || typeof localeApi.subscribe !== 'function') return undefined
+        return localeApi.subscribe(() => bumpLocale((n) => n + 1))
+      }, [])
 
       useEffect(() => {
         if (form) return undefined
         const timer = setTimeout(() => setLate(true), 4000)
         return () => clearTimeout(timer)
       }, [form])
+
+      // 界面只显示当前语言（跟随宿主 locale），不再中英同屏。
+      // 字段的 label/detailEn、TEXT.zh/TEXT.en 仍然两套都保留——改文案时两边都要改。
+      const zh = activeLocale().startsWith('zh')
+      const T = zh ? TEXT.zh : TEXT.en
 
       const st = (form && form.state) || {}
       const revision = st.revision
@@ -254,13 +270,13 @@ window.__ModuleLoader__.load({
       // 那是"还没读到"，不是"没有配置项"，别骗用户说没声明。
       if (!form) {
         return h('div', { style: { fontSize: '13px', opacity: 0.7, lineHeight: 1.6 } },
-          biText(late ? TEXT.zh.late : TEXT.zh.loading, late ? TEXT.en.late : TEXT.en.loading))
+          late ? T.late : T.loading)
       }
       if (st.status === 'loading') {
-        return h('div', { style: { fontSize: '13px', opacity: 0.7 } }, biText(TEXT.zh.loading, TEXT.en.loading))
+        return h('div', { style: { fontSize: '13px', opacity: 0.7 } }, T.loading)
       }
       if (st.status === 'unavailable') {
-        return h('div', { style: { fontSize: '13px', opacity: 0.7 } }, biText(TEXT.zh.unavailable, TEXT.en.unavailable))
+        return h('div', { style: { fontSize: '13px', opacity: 0.7 } }, T.unavailable)
       }
 
       const value = st.value || {}
@@ -379,33 +395,25 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { style: { fontSize: '13px', color: 'inherit' } },
-        h('div', { style: { fontSize: '14px', fontWeight: 600 } }, TEXT.zh.title),
-        h('div', { style: { fontSize: '12px', fontWeight: 500, opacity: 0.6, marginTop: '2px' } }, TEXT.en.title),
+        h('div', { style: { fontSize: '14px', fontWeight: 600 } }, pageTitle()),
         h('div', { style: { ...detailStyle, marginTop: '2px', marginBottom: '8px' } },
-          biText(readonly ? TEXT.zh.readonly : TEXT.zh.hint, readonly ? TEXT.en.readonly : TEXT.en.hint)),
-        h('div', { style: noteStyle },
-          h('div', null, TEXT.zh.note),
-          h('div', { style: noteEnStyle }, TEXT.en.note)),
-        banner ? h('div', { style: bannerStyle(banner.kind) },
-          h('div', null, banner.zh),
-          h('div', { style: bannerEnStyle }, banner.en)) : null,
+          readonly ? T.readonly : T.hint),
+        h('div', { style: noteStyle }, T.note),
+        banner ? h('div', { style: bannerStyle(banner.kind) }, zh ? banner.zh : banner.en) : null,
         groups.map((g) => h('div', { key: g.name },
-          h('div', { style: groupStyle }, g.name, h('span', { style: groupEnStyle }, ' / ' + g.nameEn)),
+          h('div', { style: groupStyle }, zh ? g.name : g.nameEn),
           g.items.map((item) => {
             const k = keyOf(item)
             return h('div', { key: k },
               h('div', { style: rowStyle },
                 h('div', null,
-                  h('span', { style: labelStyle }, item.label),
-                  h('span', { style: labelEnStyle }, ' / ' + item.labelEn),
+                  h('span', { style: labelStyle }, zh ? item.label : item.labelEn),
                   h('button', {
                     type: 'button',
                     style: linkStyle,
                     onClick: () => setOpen((prev) => ({ ...prev, [k]: !prev[k] })),
-                  }, (open[k] ? TEXT.zh.hide : TEXT.zh.detail) + ' / ' + (open[k] ? TEXT.en.hide : TEXT.en.detail)),
-                  open[k] ? h('div', null,
-                    h('div', { style: detailStyle }, item.detail),
-                    h('div', { style: detailEnStyle }, item.detailEn)) : null,
+                  }, open[k] ? T.hide : T.detail),
+                  open[k] ? h('div', { style: detailStyle }, zh ? item.detail : item.detailEn) : null,
                 ),
                 control(item),
               ),
@@ -418,26 +426,83 @@ window.__ModuleLoader__.load({
             style: buttonStyle(true, readonly || busy),
             disabled: readonly || busy,
             onClick: save,
-          }, (busy ? TEXT.zh.saving : TEXT.zh.save) + ' / ' + (busy ? TEXT.en.saving : TEXT.en.save)),
+          }, busy ? T.saving : T.save),
           h('button', {
             type: 'button',
             style: buttonStyle(false, readonly || busy || changed.length === 0),
             disabled: readonly || busy || changed.length === 0,
             onClick: () => { setDraft({}); setBanner(null) },
-          }, TEXT.zh.discard + ' / ' + TEXT.en.discard),
+          }, T.discard),
           h('span', { style: { fontSize: '12px', opacity: 0.6, alignSelf: 'center' } },
-            changed.length > 0 ? '待保存 ' + changed.length + ' 项 / ' + changed.length + ' unsaved' : ''),
+            changed.length > 0 ? (zh ? '待保存 ' + changed.length + ' 项' : changed.length + ' unsaved') : ''),
         ),
       )
     }
 
     return {
+      // 只硬依赖 slots（两个入口都靠它）；configForms / locale 用 ctx.inject 等宿主提供后再接：
+      // 缺失时降级——插件行配置页照常工作、设置页不出现、标题退回中文，
+      // 不会因为新服务缺失让整个 client 半侧不激活（配置页凭空消失）。
+      // 假设宿主 cordis 4 的 ctx.inject 存在（本插件最低宿主即 4；该方法缺失时 apply 会抛）。
       inject: ['slots'],
       apply(ctx) {
+        // 每次 apply 都先复位：插件被重载/停用后不能留着上一份宿主 runtime 的引用。
+        localeApi = null
+
+        // 标题跟宿主语言走；只读 active，不注册词典（标题和正文用同一个判据）。
+        // 用 ctx.inject 而不是 ctx.get：服务如果比本插件晚就位，回调会等它出现再跑。
+        ctx.inject(['locale'], (scope) => {
+          scope.effect(() => {
+            localeApi = scope.locale && typeof scope.locale.getLocale === 'function' ? scope.locale : null
+            return () => { localeApi = null }
+          }, 'ebbing-context: locale')
+        })
+
+        // 「内置插件」→ 本插件 → 配置：保留。和设置面板里的页编辑同一份配置。
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config',
           key: 'dsh-ebbing-context#dsh-ebbing-context',
         }, ConfigPage))
+
+        // 设置弹窗左侧导航里的独立页（和「通知提醒」同一层）。不能往别的插件注册的页里塞行：
+        // settings.section 的 ownerProps 只有 close，dsh-notify-me 的页也没有留子槽；
+        // 所以自己占一项，数据走 configForms.get(入口 id) 的共享读写队列。
+        // 同时等 configForms 与 locale：设置页第一次渲染就要拿到正确语言（宿主 locale 的 apply
+        // 是 async、可能晚于本插件；缺一个就整页不挂，不拿中文顶替）。行页不受影响。
+        // whileServed：宿主没把这条命名空间发出来时（例如插件被停用）页面不出现，
+        // 不会留一个点开就报「读不到配置」的空页。
+        ctx.inject(['configForms', 'locale'], (scope) => {
+          const forms = scope.configForms
+          if (!forms || typeof forms.get !== 'function' || typeof forms.whileServed !== 'function') return
+          localeApi = scope.locale && typeof scope.locale.getLocale === 'function' ? scope.locale : null
+          const formController = forms.get(CONFIG_NS)
+
+          function SettingsPage() {
+            const [snap, setSnap] = useState(() => formController.getSnapshot())
+            useEffect(() => {
+              const update = () => setSnap(formController.getSnapshot())
+              update()
+              return formController.subscribe(update)
+            }, [])
+            const st = snap || { status: 'loading' }
+            const status = st.status === 'ready' || st.status === 'unavailable' ? st.status : 'loading'
+            // ConfigPage 认的 form 形状和「插件」页给的一样：{ state, mutate }。
+            // 直接接共享表单的 snapshot 与写队列，两个入口的保存语义完全一致。
+            // useMemo：snapshot 没变时保持 form 引用稳定，ConfigPage 的 [form] effect 不会每轮重跑。
+            const pageForm = useMemo(() => ({
+              state: { status, value: st.value, revision: st.revision, writable: st.writable },
+              mutate: (ops, revision) => formController.mutate(ops, revision),
+            }), [status, st.value, st.revision, st.writable])
+            return h(ConfigPage, { view: 'page', form: pageForm })
+          }
+
+          scope.effect(() => forms.whileServed([CONFIG_NS], () => scope.slots.inject('settings.section', () => scope.slots.register({
+            name: 'settings.section',
+            id: 'ebbing-context',
+            order: 46, // 两个第三方页都是 45（通知提醒 dsh-notify-me / 归档会话 archive-manager，后者被它自己的开关挡着才不显示）；46 排在它们之后、MCP 连接器（80）之前
+            label: () => pageTitle(),
+          }, SettingsPage))), 'ebbing-context: settings page')
+        })
       },
     }
   },
