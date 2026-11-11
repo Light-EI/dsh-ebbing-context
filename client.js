@@ -74,18 +74,18 @@ window.__ModuleLoader__.load({
     const FIELDS = [
       {
         group: '配额', groupEn: 'Quota', label: 'L1 占比', labelEn: 'L1 share', path: ['budget', 'l1'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第一层把「原文」折成块，整层合计最多占可用输入的比例。0.10 表示最多占 10%。三层合计默认 0.19（10% + 6% + 3%）；调大后留给原文的空间会变小。',
-        detailEn: 'The first layer folds raw text into blocks; this caps the whole layer as a share of usable input. 0.10 means at most 10%. The three layers total 0.19 by default (10% + 6% + 3%); raising them leaves less room for raw text.',
+        detail: '第一层把「原文」折成块，整层合计最多占实际输入上限的比例。0.10 表示最多占 10%。三层合计默认 0.19（10% + 6% + 3%）；调大后留给原文的空间会变小。',
+        detailEn: 'The first layer folds raw text into blocks; this caps the whole layer as a share of the actual input limit. 0.10 means at most 10%. The three layers total 0.19 by default (10% + 6% + 3%); raising them leaves less room for raw text.',
       },
       {
         group: '配额', groupEn: 'Quota', label: 'L2 占比', labelEn: 'L2 share', path: ['budget', 'l2'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第二层把「L1 块」再折一次，整层合计最多占可用输入的比例。',
-        detailEn: 'The second layer folds L1 blocks again; this caps the whole layer as a share of usable input.',
+        detail: '第二层把「L1 块」再折一次，整层合计最多占实际输入上限的比例。',
+        detailEn: 'The second layer folds L1 blocks again; this caps the whole layer as a share of the actual input limit.',
       },
       {
         group: '配额', groupEn: 'Quota', label: 'L3 占比', labelEn: 'L3 share', path: ['budget', 'l3'], kind: 'number', step: 0.01, min: 0, max: 1,
-        detail: '第三层只放关键词句，用来保住任务目标、约束和结论。整层合计最多占可用输入的比例。',
-        detailEn: 'The third layer keeps only keywords and key sentences, preserving task goals, constraints and conclusions; this caps the whole layer as a share of usable input.',
+        detail: '第三层只放关键词句，用来保住任务目标、约束和结论。整层合计最多占实际输入上限的比例。',
+        detailEn: 'The third layer keeps only keywords and key sentences, preserving task goals, constraints and conclusions; this caps the whole layer as a share of the actual input limit.',
       },
       {
         group: '单块上限', groupEn: 'Block limit', label: 'L1 单块上限', labelEn: 'L1 block limit', path: ['segment', 'l1'], kind: 'number', step: 100, min: 64,
@@ -129,8 +129,8 @@ window.__ModuleLoader__.load({
       },
       {
         group: '提醒', groupEn: 'Reminders', label: '提醒触发占比', labelEn: 'Reminder trigger share', path: ['triggerPct'], kind: 'number', step: 0.01, min: 0.1, max: 0.99,
-        detail: '那条线画在哪。0.75 表示用到「可用输入」的 75% 开始提醒。可用输入 = 上下文窗口 − 输出预留，不是裸窗口大小。只在越过这条线时提醒一次，停在线上不会每轮重复催；掉到线下（比如压完之后）再越线才会再提醒一次。',
-        detailEn: 'Where the line is drawn. 0.75 means start reminding at 75% of usable input. Usable input = context window − output reserve, not the raw window size. It reminds once when crossing the line; staying above it does not nag every turn; dropping below (e.g. after compaction) and crossing again reminds once more.',
+        detail: '那条线画在哪。0.75 表示用到「实际输入上限」的 75% 开始提醒。实际输入上限 = 上下文窗口 − 输出预留，不是裸窗口大小。只在越过这条线时提醒一次，停在线上不会每轮重复催；掉到线下（比如压完之后）再越线才会再提醒一次。',
+        detailEn: 'Where the line is drawn. 0.75 means start reminding at 75% of the actual input limit. Actual input limit = context window − output reserve, not the raw window size. It reminds once when crossing the line; staying above it does not nag every turn; dropping below (e.g. after compaction) and crossing again reminds once more.',
       },
       {
         group: '行为', groupEn: 'Behavior', label: '原文区留住最后几轮', labelEn: 'Raw turns kept', path: ['keepTurns'], kind: 'number', step: 1, min: 1, max: 50,

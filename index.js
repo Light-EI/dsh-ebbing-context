@@ -812,8 +812,21 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   const envBlocked = st.envBlocked || null
   const anyCompressible = compressible ? Object.values(compressible).some(Boolean) : true
 
+  // 到线但一层都压不动（2026-11-12 用户裁定 A/B1）：常规的「来压缩」提醒只会换来
+  // 一次拒绝，还白叫醒一整轮；改成**轮内**追加一条紧急提示，下一步模型就能看到。
+  // 只发一次：发送成功就把 lineOn 置位，掉回线下再复位（与常规到线提醒同一套）。
+  // 自检没跑成时 anyCompressible 仍是 true（用户裁定：这是对的），走常规提醒。
+  if (onLine && !anyCompressible) {
+    const text = lineEmergencyText(usage)
+    if (appendOwn(ctx, id, text, NOTICE_KIND, log)) {
+      st.lineOn = true
+      persistGrowth(ctx, id, st, log)
+      log('line-inline', { agent: id, turn, used: usage.used, budget: usage.budget })
+    }
+  }
+
   const reasons = []
-  if (onLine) reasons.push('line')
+  if (onLine && anyCompressible) reasons.push('line')
   // 纯增长触发：一个可压的层都没有时闭嘴（用户要求 第 2 条）。
   // 但闭嘴不等于把这次增长丢掉：把门槛砍到原额的一半、基线前移到当前，
   // 再长半个额度就重新判一次（用户要求 第 2 条）。一直砍不下去说明内容还在长，
@@ -1249,6 +1262,22 @@ function deliverNotice(ctx, config, state, record, log) {
   } catch (error) {
     log('notice-append-failed', { agent: id, error: String((error && error.message) || error) })
   }
+}
+
+// 到线却没有任何可压位置时的轮内紧急提示（用户裁定 B1）。
+// 它不是「去压缩」的提醒——压不动；它只要求模型停止扩大当前轮，尽快收尾。
+function lineEmergencyText(usage) {
+  const pct = Number.isFinite(usage.ratio) ? Math.round(usage.ratio * 1000) / 10 : null
+  const pctText = pct === null ? '' : `${pct}%（${fmt(usage.used)} / ${fmt(usage.budget)}，实际输入上限）`
+  return (
+    '〔Ebbing Context 紧急提示 · 插件注入，不是用户说的话〕\n' +
+    OWN_SENTINEL + '\n' +
+    (pctText ? `上下文已到 ${pctText}，但` : '上下文已到提醒线，但') +
+    '插件此刻判断当前轮和各层都没有可压位置——现在调用 compress 只会被拒。' +
+    '不要继续扩大这一轮：不要读新的大文件或长命令，尽快把当前工作收尾。' +
+    '要立刻腾空间只能结束这一轮后让宿主压缩（宿主压缩会把分层拍平），或换一个窗口更大的模型；' +
+    '如果你在子代理里，尽快把结果返回父会话。'
+  )
 }
 
 function noticeText(ctx, config, record, count, log) {

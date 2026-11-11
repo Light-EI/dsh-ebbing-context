@@ -176,6 +176,18 @@ function usageSession(used) {
   return session
 }
 
+// 到线测试需要一个「真压得动」的会话：两个 L1 块，L1 区上限调到 0.5（块合计不越区），
+// 窗口 4000、used 3600 = 90% 到线。旧夹具只有一个用户消息，四层全不可压——按 0.2.11 的
+// 闸门会走轮内紧急提示，不再是常规提醒（这是新行为的测试，见后面的 L6/L7）。
+const LINE_CONFIG = { ...DEFAULTS, reservedTokens: 0, budget: { ...DEFAULTS.budget, l1: 0.5 } }
+
+function lineSession(used = 3600) {
+  const session = blockSession(3, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = used
+  return session
+}
+
 function usageCtx(session) {
   const ctx = fakeCtx(session)
   // 会话搜索必须装着：提醒现在走同一道闸门（回归修复），没装就不叫醒。
@@ -216,19 +228,47 @@ function wakeAgent() {
 const plainAgent = { id: 'a1' }
 
 await check('到线：pre-step 只登记，不写节点、也不叫醒', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '这一步不该写提醒')
   assert.equal(step.agent.followups.length, 0, '还没到收尾，不该叫醒')
 })
 
-await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
+await check('到线但没有任何可压位置：改发轮内紧急提示，每次越线只发一次', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  // 第 3 轮第 1 步：没有可压层 → 立即写一条紧急提示（下一步模型就能看到），不排队叫醒。
+  const s3 = STEP(3, 1)
+  await ctx.handlers.get('agent/pre-step')(s3, () => {})
+  const inline = onlyKind(session, NOTICE_KIND)
+  assert.equal(inline.length, 1, '不可压的到线要写轮内紧急提示')
+  assert.equal(s3.agent.followups.length, 0, '压不动时不该叫醒模型开新轮')
+  const text = String(inline[0].data.content[0].text)
+  assert.match(text, /紧急提示/, '必须标明是紧急提示，不是常规压缩提醒')
+  assert.match(text, /没有可压位置/, '必须说清当前没有可压位置')
+  assert.match(text, /不要继续扩大这一轮/, '必须要求停止扩大当前轮')
+  assert.match(text, /实际输入上限/, '新名字：实际输入上限')
+  // 还停在线上面：不重复写。
+  await ctx.handlers.get('agent/pre-step')(STEP(4, 1, { agent: s3.agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一次越线只提示一次')
+  // 掉回线下再越线：这是新的一次越线，要再提示一次。
+  session.used = 400
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 1, { agent: s3.agent }), () => {})
+  session.used = 900
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(6, 1, { agent: s3.agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉回线下再越线要重新提示')
+})
+
+await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
+  const session = lineSession(3600)
+  const ctx = usageCtx(session)
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
@@ -259,9 +299,9 @@ await check('turn-stopping：走 followup 把模型叫醒（不是写进表层�
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3, 1, { agent: plainAgent })
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
@@ -274,7 +314,7 @@ await check('拿不到活 agent（没有 followup）：退化成尾部追加', a
 await check('轮次标记：收尾写「下一轮 T{N+1}」，而且不会重复写', async () => {
   const session = usageSession(100) // 远低于线，不该有提醒，只剩标记
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
@@ -291,7 +331,7 @@ await check('轮次标记：收尾写「下一轮 T{N+1}」，而且不会重复
 await check('轮次标记：轮首兜底补「本轮 T{N}」，同一轮只补一次，下一步不重复', async () => {
   const session = usageSession(100)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   // 上一轮异常收场 → 没有「下一轮」那条，轮首必须自己补
   const step1 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(step1, () => {})
@@ -307,7 +347,7 @@ await check('轮次标记：轮首兜底补「本轮 T{N}」，同一轮只补�
 await check('轮次标记：上一轮收尾已经写好「下一轮」，下一轮轮首不再补', async () => {
   const session = usageSession(100)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
@@ -325,7 +365,7 @@ await check('空表层（首轮、宿主还没写系统头）→ 任何节点都
   session.requestContext = () => ({ contextWindow: 1000 })
   session.used = 100
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(1, 1)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   // 收尾也一样：这一轮连请求都没发出去时表层仍是空的
@@ -335,9 +375,9 @@ await check('空表层（首轮、宿主还没写系统头）→ 任何节点都
 })
 
 await check('只叫醒一轮：被叫醒的那轮不再登记第二条，也不连环叫醒', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const s3 = STEP(3)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
@@ -351,9 +391,9 @@ await check('只叫醒一轮：被叫醒的那轮不再登记第二条，也不�
 })
 
 await check('到线只在越线时报一次：掉回线下再越线才会再报（不在线上反复催）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, growthTokens: 0 } })
+  apply(ctx, { ...LINE_CONFIG, notice: { ...DEFAULTS.notice, growthTokens: 0 } })
   const s3 = STEP(3)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
@@ -369,7 +409,7 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
   session.seq += 1
   const s5 = STEP(5, 1, { agent: s3.agent })
   await ctx.handlers.get('agent/pre-step')(s5, () => {})
-  session.used = 900
+  session.used = 3600
   session.seq += 1
   const s6 = STEP(6, 1, { agent: s3.agent })
   await ctx.handlers.get('agent/pre-step')(s6, () => {})
@@ -378,9 +418,9 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
 })
 
 await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞第二条', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const agent = wakeAgent()
   // 模拟"上一轮以异常收场、提醒没人认领"：inbox 里留着一条我们的提醒
   // 必须带哨兵才算'我们写的'（回归修复）：宿主自己的 cordis-host-runner 消息也可能排在这里。
@@ -396,9 +436,9 @@ await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞
 })
 
 await check('同一条提醒只发一次：第二次 turn-stopping 不再发', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
@@ -407,9 +447,9 @@ await check('同一条提醒只发一次：第二次 turn-stopping 不再发', a
 })
 
 await check('后面一步算出没理由了：撤销待发，收尾不发（照旧数字说话就是说谎）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const signal = new AbortController().signal
   const agent = wakeAgent()
   await ctx.handlers.get('agent/pre-step')({ agent, turn: 3, step: 1, signal }, () => {})
@@ -423,9 +463,9 @@ await check('后面一步算出没理由了：撤销待发，收尾不发（照�
 })
 
 await check('上一轮以异常收场（turn-stopping 没来）：旧记录直接丢，不拿过期读数说话', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
-  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  apply(ctx, LINE_CONFIG)
   const agent = wakeAgent()
   await ctx.handlers.get('agent/pre-step')({ agent, turn: 3, step: 1, signal: new AbortController().signal }, () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
@@ -664,7 +704,7 @@ await check('纯增长触发但一层都压不了：不发提醒', async () => {
 })
 
 await check('提醒里明确写了「允许不压」与「压完简短回复」', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
   const step = STEP(3)
@@ -978,7 +1018,7 @@ await check('重启后增长累计接着算：基线从盘上回灌，不按当�
 
 await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不吞提醒）', async () => {
   await withScratchHome(async () => {
-    const session = usageSession(900)
+    const session = lineSession(3600)
     session.id = 'session-restart-line'
     // 关掉增长这条线，只看"到线灯"的落盘
     const config = { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, growthTokens: 0 } }
@@ -996,7 +1036,7 @@ await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不�
     await ctx1.handlers.get('agent/pre-step')(t2, () => {})
     assert.equal(readGrowth('session-restart-line') && readGrowth('session-restart-line').lineOn, false, '掉回线下后盘上必须是灭的')
     // 模拟重启，再次越线：必须重新报
-    session.used = 900
+    session.used = 3600
     session.seq += 1
     const ctx2 = usageCtx(session)
     apply(ctx2, config)
@@ -1245,34 +1285,32 @@ await check('S2 回归：同一轮里占用明显掉下来（压缩成功）后�
   assert.equal(t3b.agent.followups.length, 0, '压完了就不该再发"还超着"的提醒（否则与同一张地图自相矛盾）')
 })
 
-await check('S3 回归：只发到线提醒时，不许把"当时压不动"的区记成已提醒', async () => {
+await check('S3 回归：到线但区还压不动时走轮内紧急提示，不锁存区提醒', async () => {
   const session = layeredSession(['L1'], 400, 900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
   const t3 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(t3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal })
-  assert.equal(t3.agent.followups.length, 1, '到线提醒照发')
-  assert.doesNotMatch(String(t3.agent.followups[0].content[0].text), /区已超设计容量/, '这一层只有一块，不该报区超限')
+  // 0.2.11：到线但一层都压不动 → 不发常规提醒（那只会换来拒绝），改发轮内紧急提示。
+  assert.equal(t3.agent.followups.length, 0, '压不动时不该叫醒模型开新轮')
+  const inline = onlyKind(session, NOTICE_KIND)
+  assert.equal(inline.length, 1, '轮内紧急提示要写进表层')
+  assert.match(String(inline[0].data.content[0].text), /紧急提示/)
+  assert.match(String(inline[0].data.content[0].text), /没有可压位置/)
   // 下一轮补到两块、仍然超限：这块区第一次真正可压，必须能报出来。
-  // 注意第 4 轮是"被叫醒的那一轮"（autoTurn），按设计不登记第二条；所以看第 5 轮。
   session.pushBlock('L1')
   session.used = 920
   session.seq += 1
   const t4 = STEP(4, 1)
   await ctx.handlers.get('agent/pre-step')(t4, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal })
-  assert.equal(t4.agent.followups.length, 0, '被叫醒的那一轮不再登记第二条')
-  session.seq += 1
-  const t5 = STEP(5, 1)
-  await ctx.handlers.get('agent/pre-step')(t5, () => {})
-  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(t5.agent.followups.length, 1, '没报过的区不能被提前锁存')
-  assert.match(String(t5.agent.followups[0].content[0].text), /区已超设计容量/)
+  assert.equal(t4.agent.followups.length, 1, '区变得可压后要能报出来（没报过的区不能被提前锁存）')
+  assert.match(String(t4.agent.followups[0].content[0].text), /区已超设计容量/)
 })
 
 await check('G3 回归：被叫醒的那一轮里掉到线下，也要把到线指示灯复位', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, triggerPct: 0.75 })
   const t3 = STEP(3, 1)
@@ -1286,7 +1324,7 @@ await check('G3 回归：被叫醒的那一轮里掉到线下，也要把到线�
   await ctx.handlers.get('agent/pre-step')(t4, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal })
   // 第 5 轮又涨回线上：这是一次新的"越线"，必须能再报。
-  session.used = 900
+  session.used = 3600
   session.seq += 1
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
@@ -1317,7 +1355,7 @@ await check('标记重载去重：上一轮收尾写好的「下一轮 T3」还�
 // —— 用户要求：配置硬错误 + 每步只扫一次表层 ────────────────────
 
 await check('keepTurns 配成 0：配置层兜底取 1，pre-step 不再报红停轮', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   // 用户 2026-11-05 定：面板拦正常输入，插件侧兜底取 1——不再每轮抛红把对话打死。
   apply(ctx, { ...DEFAULTS, keepTurns: 0 })
@@ -1331,7 +1369,7 @@ await check('keepTurns 配成 0：配置层兜底取 1，pre-step 不再报红�
 })
 
 await check('每步只扫一遍表层（三个用途共用同一份，不再各扫一遍）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   let scans = 0
   const inner = ctx.get
@@ -1586,7 +1624,7 @@ await check('rc.2：header 没有 origin/depth 时读运行期 options.subagentD
 
 await check('turn-stopping 载荷没带 agent：不静默，按信号把待发提醒发出去（GLM Minor 1）', async () => {
   await withScratchHome(async () => {
-    const session = usageSession(900)
+    const session = lineSession(3600)
     const ctx = usageCtx(session)
     ctx.agents = { requireInitiator: () => ({ id: 'a1' }), roots: () => [{ id: 'a1' }] } // rc.1：roots 非空
     // 必须关掉 notifySubagents：旧代码在 notify=true 时 quiet 恒 false，这条测试就抓不到 bug（审查修复）。
@@ -1601,7 +1639,7 @@ await check('turn-stopping 载荷没带 agent：不静默，按信号把待发�
 })
 
 await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯也要复位（否则重新启用后到线提醒永久丢）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, notice: { ...DEFAULTS.notice, growthTokens: 100000 } })
   const t3 = STEP(3, 1)
@@ -1617,7 +1655,7 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   assert.equal(t4.agent.followups.length, 0, '没装会话搜索时不许叫醒')
   // 重新启用，用量再次越线：这一次的到线提醒必须能发出来。
   ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
-  session.used = 920
+  session.used = 3600
   session.seq += 1
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
@@ -1626,7 +1664,7 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   assert.match(String(t5.agent.followups[0].content[0].text), /上下文/, '发的应该还是到线提醒')
 })
 await check('没装会话搜索插件：不叫醒（地图与工具都是停用的）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   // 覆盖掉 usageCtx 给的 get：模拟"宿主没装 dsh-tool-session-query"
   ctx.tools = { register: () => () => {}, get: () => undefined }
@@ -1639,7 +1677,7 @@ await check('没装会话搜索插件：不叫醒（地图与工具都是停用�
 })
 
 await check('读不到表层：pre-step 直接报红（工作对象坏了，不许装作可压）', async () => {
-  const session = usageSession(900)
+  const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
   Object.defineProperty(session, 'surface', {

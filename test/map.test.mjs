@@ -52,22 +52,29 @@ const agent = { id: 'a1' }
 const usage = { used: 90000, ratio: 90000 / 192000, budget: 192000 }
 const text = renderMap(ctx, agent, config, usage).text
 
-check('地图带每层压力表头（含每区占比）', /区域\s+已用（占可用输入）\s+区上限/.test(text) && /（\d+\.\d%）/.test(text), text.slice(0, 300))
+check('地图带每层压力表头（含每区占比）', /区域\s+已用（占实际输入上限）\s+区上限/.test(text) && /（\d+\.\d%）/.test(text), text.slice(0, 300))
 // 总量必须并排两个数：宿主口径 + 插件自估（2026-11-07 用户要求）。压缩成功回执那一刻宿主的数
 // 还带过渡估算，只报一个数会让人以为真实占用高出一大截；并排显示才能互相核对。
 // 断言连数值一起钉：fixture 的 ratio = used/budget，宿主数、自估数、百分比、窗口四段都得在，
 // 只钉格式的话把宿主/自估对调、或把 ratio 换成别的数都照样绿（复审实测）。
 check('总量并排两个数（宿主口径 + 自估，数值与占比一致）',
-  /^上下文 90,000 token（宿主口径）\/ 自估 [\d,]+（[\d.]+%） \/ 可用输入 192,000（46\.9%）$/.test(text.split('\n')[0]),
+  /^上下文 90,000 token（宿主口径）\/ 自估 [\d,]+（[\d.]+%） \/ 实际输入上限 192,000（46\.9%）$/.test(text.split('\n')[0]),
   text.split('\n')[0])
+// 2026-11-12：分母改名「实际输入上限」，并在地图里写出「窗口 − 输出预留」的算式；
+// 只显示派生值会被误当成窗口本身（用户原话：「可用输入是什么鬼东西」）。
+const formulaText = renderMap(ctx, agent, config, { used: 90000, ratio: 90000 / 192000, budget: 192000, window: 200000, reserve: 8000 }).text
+check('实际输入上限带「窗口 − 输出预留」算式',
+  /实际输入上限 192,000（46\.9%；= 窗口 200,000 − 输出预留 8,000）$/.test(formulaText.split('\n')[0]) &&
+    !/可用输入/.test(formulaText.split('\n')[0]),
+  formulaText.split('\n')[0])
 // 三支边缘：无宿主账单、ratio 缺失、取不到窗口。
 const noUsageText = renderMap(ctx, agent, config, null).text
 check('取不到宿主账单时总量退回自估口径', /插件自估口径/.test(noUsageText.split('\n')[0]), noUsageText.split('\n')[0])
 const noRatioText = renderMap(ctx, agent, config, { used: 90000, budget: 192000, ratio: NaN }).text
-check('宿主 ratio 缺失/NaN 时不渲染百分比段', /\/ 可用输入 192,000$/.test(noRatioText.split('\n')[0]) && !/NaN%|undefined%/.test(noRatioText), noRatioText.split('\n')[0])
+check('宿主 ratio 缺失/NaN 时不渲染百分比段', /\/ 实际输入上限 192,000$/.test(noRatioText.split('\n')[0]) && !/NaN%|undefined%/.test(noRatioText), noRatioText.split('\n')[0])
 const bare = { surface: { nodes }, deriveMessages: () => messages }
 const noWindowText = renderMap({ ...ctx, sessions: { get: () => bare } }, agent, config, { used: 50000 }).text
-check('取不到窗口时只报两个总量、不渲染可用输入', /^上下文 50,000 token（宿主口径）\/ 自估 [\d,]+$/.test(noWindowText.split('\n')[0]), noWindowText.split('\n')[0])
+check('取不到窗口时只报两个总量、不渲染实际输入上限', /^上下文 50,000 token（宿主口径）\/ 自估 [\d,]+$/.test(noWindowText.split('\n')[0]), noWindowText.split('\n')[0])
 check('地图带区上限数值（L1/L2/L3 三行都在）', /L3/.test(text) && /L2/.test(text) && /L1/.test(text))
 check('地图带块表（序号/区/覆盖轮次/token/标题）', /序号?按区各自从 1 起/.test(text) && /覆盖轮次/.test(text), text.slice(0, 400))
 check('地图里能看见块的标题', /git 基线与环境事实/.test(text))
@@ -191,6 +198,9 @@ check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
   const keepText = renderMap(oneCtx, agent, { ...config, keepTurns: 2 }, usage).text
   check('F4：keepTurns 把轮次全保住时，原文区仍非空——标记说明行不能跟着消失',
     /暂不可用：keepTurns=2/.test(keepText) && /原文区里每条〔轮次标记〕/.test(keepText), keepText.slice(0, 500))
+  check('F4b：不可压时不再建议"把 keepTurns 调小/等轮次多了"（当前轮永远不可压）',
+    /当前轮本身永远不可压/.test(keepText) && !/把 keepTurns 调小/.test(keepText) && !/等轮次多了再压/.test(keepText),
+    keepText.slice(0, 500))
   check('只有一个可写轮：写单值 `可写 to 的轮号：T1（`，不写 T1–T1',
     /可写 to 的轮号：T1（/.test(oneText) && !/可写 to 的轮号：T1…T1/.test(oneText), oneText.slice(0, 400))
 }
