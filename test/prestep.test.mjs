@@ -1417,6 +1417,189 @@ await check('超窗口：静默子代理收尾也会清零，不会把两次隔�
   assert.equal(disarmed, 0, '中间成功过一轮，下一次超窗仍算"第一次"（静默子代理同样适用）')
 })
 
+// —— 0.2.2-rc.2：宿主删掉了 agents.roots()，子代理身份改由持久化会话头给出 ——
+// 依据：rc.2 `packages/core/agent/src/index.ts` 删掉 roots()/isOwnedBy() 与运行期 owner；
+// `SessionHeader.origin === 'subagent'` / `delegationDepth > 0` 是可持久化的子代理分类
+// （header 注释明确说 parentSession 不能用来判子代理）。老宿主退回 roots()。
+await check('0.2.2-rc.2：没有 roots() 时按 session.header.origin 认子代理（静默，不写轮次标记）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-1'
+    session.header = { version: 4, id: 'sub-1', createdAt: 0, isSeeded: false, origin: 'subagent', delegationDepth: 1 }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-1' }) } // rc.2：这个服务上没有 roots()
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-1'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 0, '子代理不该被写轮次标记')
+    assert.equal(step.agent.followups.length, 0, '子代理不该被叫醒')
+  })
+})
+
+await check('0.2.2-rc.2：会话头没有 origin 的顶层会话仍按根处理（不能把子代理判据做成一律静默）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'a1'
+    session.header = { version: 4, id: 'a1', createdAt: 0, isSeeded: false }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'a1' }) }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+    const step = STEP(3, 1)
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 1, '根会话照常写轮次标记')
+  })
+})
+
+await check('老宿主：没有会话头时仍用 agents.roots() 判子代理', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-legacy'
+    const root = { id: 'a1' }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => root, roots: () => [root] }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-legacy'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 0, '不在 roots() 里的就是子代理')
+  })
+})
+
+// 载荷里的 agent 不保证带 session（turn-stopping 的融合对象可能只有 id）：
+// 拿不到 agent.session 时必须回查 ctx.sessions.get(agent.id)，否则 rc.2 上没有 roots() 会一律当根。
+await check('0.2.2-rc.2：payload.agent 只有 id 时用 ctx.sessions.get(id).header 认子代理', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-2'
+    session.header = { version: 4, id: 'sub-2', createdAt: 0, isSeeded: false, origin: 'subagent', delegationDepth: 1 }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-2' }) } // rc.2：没有 roots()
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1, { agent: { id: 'sub-2' } }) // 只有 id，没有 .session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: { id: 'sub-2' } }, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 0, '回查到 header 后仍判子代理')
+  })
+})
+
+await check('delegationDepth>0（头里没有 origin）仍判子代理，锁住第二分支', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-depth'
+    session.header = { version: 4, id: 'sub-depth', createdAt: 0, isSeeded: false, delegationDepth: 1 }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-depth' }) }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-depth'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 0, 'depth>0 只由 spawn 子代理写入，应静默')
+  })
+})
+
+await check('rc.1 roots() 存在时运行期根身份优先：以根恢复的子代理会话仍按根（老行为不变）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-1'
+    session.header = { version: 4, id: 'sub-1', createdAt: 0, isSeeded: false, origin: 'subagent' }
+    const ctx = usageCtx(session)
+    // rc.1 的 roots() 里含它：子代理会话被以根身份恢复（parentAgent 省略），运行期就是用户正在聊的会话
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-1' }), roots: () => [{ id: 'sub-1' }] }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-1'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 1, '运行期根身份优先，主会话不许静默')
+  })
+})
+
+await check('header 为空且没有 roots()：按根处理（宁可多标记，不静默主会话）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'a1'
+    session.header = null
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'a1' }) }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+    const step = STEP(3, 1)
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 1, '拿不到判据时按根处理')
+  })
+})
+
+await check('notifySubagents=true 时子代理照常参与（配置交互语义未变）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-1'
+    session.header = { version: 4, id: 'sub-1', createdAt: 0, isSeeded: false, origin: 'subagent' }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-1' }) }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: true } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-1'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 1, '配置说参与就要参与')
+  })
+})
+
+await check('默认配置（notifySubagents 默认 true）下子代理照常参与', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-1'
+    session.header = { version: 4, id: 'sub-1', createdAt: 0, isSeeded: false, origin: 'subagent' }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-1' }) }
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0 }) // 不覆盖 notice：验证真实默认值
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-1'
+    step.agent.session = session
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 1, '默认参与，不是默认静默')
+  })
+})
+
+await check('rc.2：header 没有 origin/depth 时读运行期 options.subagentDepth（与宿主 delegationDepthOf 口径一致）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(100)
+    session.id = 'sub-opt'
+    session.header = { version: 4, id: 'sub-opt', createdAt: 0, isSeeded: false }
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'sub-opt' }) } // rc.2：没有 roots()
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+    const step = STEP(3, 1)
+    step.agent.id = 'sub-opt'
+    step.agent.session = session
+    step.agent.options = { subagentDepth: 1 }
+    await ctx.handlers.get('agent/pre-step')(step, () => {})
+    assert.equal(onlyKind(session, MARKER_KIND).length, 0, '只设运行期 depth 的子代理也要认出来')
+  })
+})
+
+await check('turn-stopping 载荷没带 agent：不静默，按信号把待发提醒发出去（GLM Minor 1）', async () => {
+  await withScratchHome(async () => {
+    const session = usageSession(900)
+    const ctx = usageCtx(session)
+    ctx.agents = { requireInitiator: () => ({ id: 'a1' }), roots: () => [{ id: 'a1' }] } // rc.1：roots 非空
+    // 必须关掉 notifySubagents：旧代码在 notify=true 时 quiet 恒 false，这条测试就抓不到 bug（审查修复）。
+    apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, notice: { ...DEFAULTS.notice, growthTokens: 100000, notifySubagents: false } })
+    const t3 = STEP(3, 1)
+    await ctx.handlers.get('agent/pre-step')(t3, () => {})
+    assert.equal(t3.agent.followups.length, 0, 'pre-step 只排队，到收尾才投递')
+    // 旧代码在这里 roots.some 无匹配 → 判子代理 → 早退，提醒永远发不出去（更早的 includes 形态同样恒真）
+    await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal }, () => {})
+    assert.equal(t3.agent.followups.length, 1, '没有 agent 也要按信号投递')
+  })
+})
+
 await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯也要复位（否则重新启用后到线提醒永久丢）', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)

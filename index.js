@@ -306,9 +306,9 @@ export function apply(ctx, rawConfig = {}) {
     // 而不是被我们自己吞掉。每一轮都重判：真修好了（日志重新可用）就自己恢复，不用重启。
     // 配置硬错误与大纲损坏一样不许降级：keepTurns < 1 等于允许把进行中的轮压掉。
     // 只在"根 agent"上工作：子代理是我们派出去干活的助手，不是用户在聊的这份对话。
-    // 宿主用 `agents.enter(agent, owner)` 登记父子关系，`roots()` 给出所有顶层 agent
-    // （ref/upstream/installed/agent.index.js:623-625）。默认不打扰子代理——
-    // 给它们叫醒、写轮次标记、把配置错误报成红字都没有意义，还会打断它们自己的节奏。
+    // 不过 `notice.notifySubagents` 默认 true——子代理也会碰到已压缩的表层，没有轮次标记
+    // 就看不出块盖住了哪几轮，所以默认连子代理一起写；只有用户把它关掉时才静默。
+    // 子代理判据见 isSubagent()：0.2.2-rc.2 起看持久化会话头，老宿主退回 `agents.roots()`。
     const quiet = isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)
     // 只读检查（用户定下的规矩）：日志里停着没闭合的压缩事务时，**这一轮什么节点都不写**。
     // 为什么不等 compress 自己拒：宿主在写 turn/start 之后、我们第一次拿到控制权时，
@@ -569,16 +569,43 @@ const FOLD_REASON_TEXT = {
 // 既不额外多算一遍，也不会拿开头那一步的旧数字去说话。
 // 轮次大纲损坏的判定（设计约束）：只有"日志在手、且与表层自相矛盾"才算损坏。
 // 日志里根本没有 turn/start（测试桩、或宿主换了装载方式）时宁可先不动——那是"看不到"，不是"矛盾"。
-// 是不是子代理？宿主建 agent 时用 `agents.enter(agent, owner)` 登记父子关系，
-// `roots()` 返回所有顶层 agent（ref/upstream/installed/agent.index.js:617-625）。
-// 默认不打扰子代理：它们是我们派出去干活的助手，不是用户在聊的这份对话。
+// 是不是子代理？
+// rc.1（有 `agents.roots()`）：运行期根身份是权威——只要这个 agent 在 roots() 里，它就是"用户正在聊的会话"，
+//   哪怕会话头说它是子代理（典型：子代理会话被以根身份恢复，运行期 owner 已经丢了）。这时保持老行为：
+//   按根处理、照常写标记/提醒。roots() 拿不到或为空时再看会话头（少见：测试桩/老宿主）。
+// rc.2（`roots()` 已删除）：只能看持久化会话头 + 运行期 options：
+//   - `origin === 'subagent'` 是权威分类（SessionHeader 注释明确说 parentSession 不能用来判）；
+//   - `delegationDepth` / `options.subagentDepth > 0` 作次级证据：宿主只在 spawn 子代理时写
+//     （child-agent 的 resolveChildDepth = 父 depth + 1），根会话（含开启 AgentTeam 的根会话）不会 >0；
+//     宿主自己的口径是 max(header.delegationDepth, options.subagentDepth)（depth.ts），两边都读；
+//   - 头里既没 origin 也没 depth 的老日志：rc.2 只能按根处理（宁可多写标记，也不让主会话静默）。
+// 调用点拿到的 agent 可能只有 id（turn-stopping 载荷不保证带完整对象），所以先从 agent.session 取，
+// 取不到再用 ctx.sessions.get(agent.id)；roots() 兜底按 id 比而不是对象身份。
 function isSubagent(ctx, agent) {
   try {
+    const id = agent && agent.id
+    // 载荷没带 agent（turn-stopping 契约不保证带）：无法判定就按根处理，绝不静默主会话。
+    // 旧代码在 id 缺失时 roots.some 无匹配 → 判子代理（更早的 includes 形态同样恒真），
+    // 会把主会话误判成子代理、整轮收尾（flushNotice/settleGrowth/markNextTurn）全跳过——GLM 审查 Minor 1 的既有隐患。
+    if (!id) return false
     const agents = ctx.agents || (typeof ctx.get === 'function' ? ctx.get('agents') : null)
-    if (!agents || typeof agents.roots !== 'function') return false
-    const roots = agents.roots()
-    if (!Array.isArray(roots) || roots.length === 0) return false
-    return !roots.includes(agent)
+    if (agents && typeof agents.roots === 'function') {
+      const roots = agents.roots()
+      if (!Array.isArray(roots) || roots.length === 0) return false
+      return !roots.some((root) => root === agent || (root && id && root.id === id))
+    }
+    const session =
+      (agent && agent.session) ||
+      (id && ctx.sessions && typeof ctx.sessions.get === 'function' ? ctx.sessions.get(id) : null)
+    const header = session && session.header
+    if (header && header.origin === 'subagent') return true
+    let depth = 0
+    if (header && typeof header.delegationDepth === 'number' && Number.isSafeInteger(header.delegationDepth)) {
+      depth = header.delegationDepth
+    }
+    const runtimeDepth = agent && agent.options ? agent.options.subagentDepth : undefined
+    if (typeof runtimeDepth === 'number' && Number.isSafeInteger(runtimeDepth)) depth = Math.max(depth, runtimeDepth)
+    return depth > 0
   } catch {
     return false
   }
@@ -974,7 +1001,8 @@ function settleGrowth(ctx, config, state, payload, log) {
   // 提醒还挂在 inbox 的 next-turn 里没人认领（用户恰在收尾时插话、或上一轮异常收场）：
   // 这一轮不是"给它的一轮"，先别结算——否则门槛重设、基线前移，等于白送一次叫醒，
   // 而那句提醒真正被读到时要再等一轮才有效（设计约束）。
-  // 拿不到 agent 时退回旧口径（按轮号判），不因为少一个字段就把提醒永久卡住。
+  // 拿不到 agent（无 id）时上面直接 return：这一轮不结算，下一轮 turn 超过 growthPending
+  // 时会补结算，不会永久卡住（压缩成功路径也会清）。
   if (payload.agent && pendingNoticeOf(payload.agent)) return
   const turn = typeof payload.turn === 'number' ? payload.turn : null
   // 还在被叫醒的那一轮里：给它这一步的时间，收尾时才结算。

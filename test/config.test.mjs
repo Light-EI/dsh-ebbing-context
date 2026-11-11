@@ -167,6 +167,19 @@ pass0: {
 reject('keepTurns 写成字符串', { keepTurns: 'abc' }, 'keepTurns')
 reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
 
+// 兼容上限纪律（2026-11-11 用户裁定）：peer 范围的上限必须是"实际核对过的宿主版本"，
+// 不许写开放式 `<0.3`。宿主出新版时先重新核对、把上限改到新版，再发插件。
+// 这条钉的是发布纪律：换成别的等价写法也会红（故意的），不是 semver 等价校验。
+{
+  total++
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const range = String(pkg.peerDependencies && pkg.peerDependencies['@deepseek-ai/dsh-llm'])
+  if (!range.endsWith('<=0.2.2-rc.2') || /<0\.3(?![.\d])/.test(range)) {
+    console.error(`FAIL peer 兼容上限必须是已核对的 0.2.2-rc.2（不许 <0.3）: ${range}`)
+    failed++
+  }
+}
+
 if (failed) {
   console.error(`\n${failed} 项失败`)
   process.exit(1)
