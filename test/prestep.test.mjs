@@ -1757,6 +1757,16 @@ await check('没装会话搜索插件：不叫醒（地图、工具与 inline �
   await ctx2.handlers.get('agent/turn-stopping')({ turn: 3, signal: step2.signal }, () => {})
   assert.equal(step2.agent.followups.length, 0, '没装会话搜索时，压得动也不许叫醒（C1）')
   assert.equal(onlyKind(s2, NOTICE_KIND).length, 0, '也不许写轮内紧急提示')
+
+  // 正向对照（顺序必须在上面两条 0 之后）：同一夹具装上会话搜索 → 必须叫醒 1 次。
+  // 没有它，上面两条 0 可能因为前面用例残留 st.lineOn=true 而变成假绿（reminded 是模块级 Map）。
+  const s3 = lineSession(3600)
+  const ctx3 = usageCtx(s3)
+  apply(ctx3, LINE_CONFIG)
+  const step3 = STEP(3, 1, { agent: wakeAgent() })
+  await ctx3.handlers.get('agent/pre-step')(step3, () => {})
+  await ctx3.handlers.get('agent/turn-stopping')({ turn: 3, signal: step3.signal }, () => {})
+  assert.equal(step3.agent.followups.length, 1, '对照：装了会话搜索才叫醒；这里若变 0，上面两条 0 就是假绿')
 })
 
 await check('读不到表层：pre-step 直接报红（工作对象坏了，不许装作可压）', async () => {
