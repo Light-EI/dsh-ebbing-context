@@ -205,7 +205,7 @@ check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
   }
   const oneText = renderMap(oneCtx, agent, config, usage).text
   check('地图正文不许出现工具名（折叠短注会把它带进对话，SPEC L485）', !/compress|context_map/.test(oneText), (oneText.match(/compress|context_map/) || [])[0] || '')
-  const keepText = renderMap(oneCtx, agent, { ...config, keepTurns: 2 }, usage).text
+  const keepText = renderMap(oneCtx, agent, { ...config, keepTurns: 2 }, { ...usage, used: 1000, ratio: 1000 / 192000 }).text
   check('F4：keepTurns 把轮次全保住时，原文区仍非空——标记说明行不能跟着消失',
     /暂不可用：keepTurns=2/.test(keepText) && /原文区里每条〔轮次标记〕/.test(keepText), keepText.slice(0, 500))
   check('F4b：不可压时不再建议"把 keepTurns 调小/等轮次多了"（当前轮永远不可压）',
@@ -383,6 +383,44 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   const c = { sessions: { get: () => sess }, get: (name) => (name === 'sessionProjections' ? { stateOf: () => ({ turns: [{ turn: 1, seq: 6 }, { turn: 2, seq: 7 }] }) } : null) }
   const line = (renderMap(c, agent, config, usage).text.split('\n').find((l) => l.startsWith('l0 ')) || '')
   check('l0 走叫醒门槛口径：说「门槛」而不是断言「压完不会更小」', /叫醒门槛/.test(line) && !/压完不会比原样更小/.test(line), line)
+}
+
+// 2026-11-12 用户 E 待办：地图必须与运行时 keepTurns 同源——占用达到总长线（triggerPct，默认 75%）时，
+// 最近几轮进入可压范围，并在原文区上方说明这是临时降 0、不是配置被改。
+{
+  const autoMsgs = [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'T1 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T1 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T2 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T2 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T3 当前轮' }] },
+  ]
+  const autoSession = {
+    surface: { nodes: [5, 10, 11, 20, 21, 30] },
+    deriveMessages: () => autoMsgs,
+    requestContext: () => ({ contextWindow: 100000 }),
+    requestHeader: () => ({ config: { maxTokens: 8000 } }),
+  }
+  const autoCtx = {
+    sessions: { get: () => autoSession },
+    get: (name) => (name === 'sessionProjections'
+      ? { stateOf: () => ({ turns: [{ turn: 1, seq: 10 }, { turn: 2, seq: 20 }, { turn: 3, seq: 30 }] }) }
+      : null),
+  }
+  const autoCfg = { ...config, keepTurns: 2 }
+  const underText = renderMap(autoCtx, agent, autoCfg, { used: 10000, ratio: 10000 / 92000, budget: 92000 }).text
+  check('占用未到总长线：仍按配置 keepTurns=2 保护最近两轮',
+    /暂不可用：keepTurns=2/.test(underText) && !/可写 to 的轮号/.test(underText), underText.split('\n').filter((l) => /^l0/.test(l)).join('\n'))
+  const overText = renderMap(autoCtx, agent, autoCfg, { used: 93000, ratio: 93000 / 92000, budget: 92000 }).text
+  check('占用达到总长线：地图说明 keepTurns 临时按 0 生效',
+    /keepTurns 本步按 0 生效/.test(overText) && /已达到总长线 75%/.test(overText) && /配置是 2/.test(overText), overText.slice(0, 900))
+  check('自动降 0 后最近已结束轮进入可写范围（当前轮仍不出现）',
+    /可写 to 的轮号：T1/.test(overText) && /T1…T2/.test(overText) && !/可写 to 的轮号：[^（]*T3/.test(overText), overText.split('\n').filter((l) => /^l0/.test(l)).join('\n'))
+  check('运行时覆盖不写回配置', autoCfg.keepTurns === 2)
+  const ratioOnly = renderMap(autoCtx, agent, autoCfg, { ratio: 0.8 }).text
+  check('只有 ratio 没有 used/budget 时，降 0 说明不渲染占位 em dash',
+    /keepTurns 本步按 0 生效/.test(ratioOnly) && !/当前占用 — token|实际输入上限 —/.test(ratioOnly), ratioOnly.slice(0, 900))
 }
 
 if (failed) {

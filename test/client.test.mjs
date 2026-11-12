@@ -24,6 +24,9 @@ check('页面文案不残留旧默认数 60000 / 24000', !/60000|24000/.test(tex
 
 // keepTurns 的 cutoff 在 resolveTurnAnchor 里是「当前轮 − 1 − N」；文案写「当前轮 − N」等于少算一轮。
 check('keepTurns 文案写「当前轮 − 1 − N」', text.includes('当前轮 − 1 − N'))
+check('keepTurns 文案说明达到总长线时运行时临时按 0、降回线下恢复',
+  text.includes('运行时临时按 0 生效') && text.includes('占用回到线下自动恢复')
+  && text.includes('总长线') && text.includes('triggerPct') && !/三层总长|budget\.l1\+l2\+l3/.test(text))
 
 // 提醒正文与工具描述的口径是「在一次压缩中完成，不要分多次压缩」；面板不能教相反的做法。
 check('单块超限的说明不教「分几次压」', !text.includes('分几次压'))
@@ -82,4 +85,4 @@ if (failed) {
   console.error(`client 文案断言 ${failed} 项失败`)
   process.exit(1)
 }
-console.log('client 文案、语言与设置页断言全部通过（22 项）')
+console.log('client 文案、语言与设置页断言全部通过（23 项）')

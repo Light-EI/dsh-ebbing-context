@@ -24,11 +24,26 @@
 //   5 未闭合事务预检
 //   6 并发第二个 compress 被拒
 
+import { apply } from '../index.js'
 import { runCompress } from '../lib/compress.js'
 import { readZones, openCompaction } from '../lib/blocks.js'
 import { issue } from '../lib/license.js'
 import { DEFAULTS } from '../lib/config.js'
 import { messageTokens } from '../lib/tokens.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+// 用例 29 会经真实 apply() 注册的 compress 工具写运行日志；把 DSH_HOME 指到临时目录，
+// 不让测试的假 compress-ok / compress-rejected 行混进真机日志（qwen 复审 Minor）。
+const testHome = mkdtempSync(join(tmpdir(), 'ec-e2e-home-'))
+const savedHome = process.env.DSH_HOME
+process.env.DSH_HOME = testHome
+process.on('exit', () => {
+  if (savedHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = savedHome
+  try { rmSync(testHome, { recursive: true, force: true }) } catch {}
+})
 
 let total = 0
 let failed = 0
@@ -1139,7 +1154,67 @@ await runCase('用例14 级联提示的可写区间', case14)
 await runCase('用例24 l1 首块低于地板的归因', case24)
 await runCase('用例25 l3 的建议要可执行', case25)
 await runCase('用例26 两块层的建议要可执行', case26)
+
+// 用例 28：运行时 keepTurns 的两种值都要真的进区间校验（用户 E 待办）。
+// index.js 在达到总长线（triggerPct）时会把 runConfig.keepTurns 设为 0；这里钉住 compress 的结果差异。
+async function case28() {
+  const session = rawTwoTurns(400)
+  const agent = agentFor('e2e-agent-28')
+  const ctx = fakeCtx(session)
+  const logger = makeLogger()
+  issueLicense(ctx, session, agent, logger.fn)
+  const args = { l0: { title: '第一阶段', summary: W(120, '压'), to: 'T1' } }
+  const denied = await runCompress(ctx, agent, args, { ...config, keepTurns: 2 }, logger.fn)
+  check('28a · keepTurns=2 时 T1 仍在保护圈，拒压', denied.ok === false && /keepTurns=2/.test(denied.reason), show(denied.reason))
+  const allowed = await runCompress(ctx, agent, args, { ...config, keepTurns: 0 }, logger.fn)
+  check('28b · 同一区间 keepTurns=0 时可压', allowed.ok === true, show(allowed.reason))
+}
+
+// 用例 29：index.js 的 compress 工具 wrapper 必须按运行时 keepTurns 传参（用户硬要求）。
+// 直接调 runCompress 的用例绕过了 wrapper；这里走 apply() 注册出来的真实工具。
+function toolCtx(session, used) {
+  const ctx = fakeCtx(session)
+  const registered = []
+  ctx.tools = {
+    register: (tool) => (registered.push(tool), () => {}),
+    get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined),
+  }
+  ctx.on = () => () => {}
+  ctx.effect = (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} }
+  ctx.agents = { requireInitiator: () => ({ id: 'e2e-tool-29' }) }
+  const realMeasure = ctx.tokenMeter.measure.bind(ctx.tokenMeter)
+  ctx.tokenMeter.measure = (s) => ({ ...realMeasure(s), totalTokens: used })
+  session.requestContext = () => ({ contextWindow: 200000 })
+  session.requestHeader = () => ({ config: { maxTokens: 0 } })
+  apply(ctx, { ...DEFAULTS, keepTurns: 2, triggerPct: 0.75, requireSessionQuery: false, foldCallRecord: false })
+  return registered
+}
+
+async function case29() {
+  const agent = { id: 'e2e-tool-29' }
+  const exec = { agent, callId: 'call-29' }
+
+  const above = rawTwoTurns(400)
+  const toolsAbove = toolCtx(above, 160000) // 80% > 75%，运行时应降 0
+  const mapAbove = toolsAbove.find((t) => t.name === 'context_map')
+  const compressAbove = toolsAbove.find((t) => t.name === 'compress')
+  const mapOut = await mapAbove.execute({}, exec)
+  check('29a · 工具 wrapper 的 context_map 可用（发许可证）', typeof mapOut.text === 'string' && /可压位置/.test(mapOut.text), mapOut.text)
+  const outAbove = await compressAbove.execute({ l0: { title: '工具 wrapper', summary: W(120, '压'), to: 'T1' } }, exec)
+  check('29b · 达到总长线时 wrapper 按 keepTurns=0 放行 T1', !/没能压缩/.test(outAbove.text), outAbove.text.slice(0, 300))
+  check('29c · 压缩真的落盘（四条事件）', above.appends.length === 4 && above.appends.map((a) => a.type).join(',') === 'compaction/start,compaction/summary,user/message,compaction/end', show(above.appends.map((a) => a.type)))
+
+  const below = rawTwoTurns(400)
+  const toolsBelow = toolCtx(below, 140000) // 70% < 75%，仍保护最近两轮
+  const mapBelow = toolsBelow.find((t) => t.name === 'context_map')
+  const compressBelow = toolsBelow.find((t) => t.name === 'compress')
+  await mapBelow.execute({}, exec)
+  const outBelow = await compressBelow.execute({ l0: { title: '工具 wrapper', summary: W(120, '压'), to: 'T1' } }, exec)
+  check('29d · 未到总长线时 wrapper 仍传 keepTurns=2，T1 被拒', /没能压缩/.test(outBelow.text) && /keepTurns=2/.test(outBelow.text), outBelow.text.slice(0, 300))
+}
+await runCase('用例29 compress 工具 wrapper 的运行时 keepTurns', case29)
 await runCase('用例27 l0 最后一轮的建议', case27)
+await runCase('用例28 keepTurns 运行时值进入 compress 区间校验', case28)
 await runCase('用例10 许可证闸门负例', case10)
 
 console.log('\n—— 用例小结 ——')

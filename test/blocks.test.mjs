@@ -1,6 +1,6 @@
 // 区块划分与锚点解析的断言测试（失败以非零退出码结束）。
 // 跑法：node plugin/test/blocks.test.mjs
-import { PRODUCT_FLOOR, canCompressZone, costOfMessage, isTurnBoundaryPair, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, routeOf, productFloor, turnBounds, worthCompressing, writableTo, zoneRangeCost } from '../lib/blocks.js'
+import { PRODUCT_FLOOR, canCompressZone, costOfMessage, isTurnBoundaryPair, keepTurnsState, lastCompressibleTurn, parseHeader, readZones, resolveTurnAnchor, resolveZoneIndex, routeOf, productFloor, turnBounds, worthCompressing, writableTo, zoneRangeCost } from '../lib/blocks.js'
 
 let failed = 0
 let total = 0
@@ -847,6 +847,30 @@ const badAnchor = resolveTurnAnchor(zones, '117')
 check('轮号写成纯数字时拒因指向地图、不出现示例轮号',
   badAnchor.ok === false && badAnchor.reason.includes('地图') && !/T\d/.test(badAnchor.reason), badAnchor.reason)
 
+
+// 2026-11-12 用户 E 待办：占用达到总长线（triggerPct，默认 75%）时 keepTurns 运行时按 0，降下去恢复。
+{
+  const cfg = { keepTurns: 2, triggerPct: 0.75 }
+  check('总长线 = triggerPct（不是实际输入上限，也不是三层预算合计）',
+    keepTurnsState(cfg, { used: 100000, budget: 100000 }).line === 0.75)
+  const atLine = keepTurnsState(cfg, { ratio: 0.75, used: 75000, budget: 100000 })
+  check('占用恰好达到总长线：运行时 keepTurns=0，且保留配置值',
+    atLine.value === 0 && atLine.configured === 2 && atLine.auto === true, JSON.stringify(atLine))
+  const under = keepTurnsState(cfg, { ratio: 0.749, used: 74900, budget: 100000 })
+  check('占用未到线：仍按配置 keepTurns=2', under.value === 2 && under.auto === false, JSON.stringify(under))
+  const back = keepTurnsState(cfg, { ratio: 0.5, used: 50000, budget: 100000 })
+  check('占用降回线下：自动恢复配置值', back.value === 2 && back.auto === false, JSON.stringify(back))
+  check('取不到用量/比例/线时不启用自动降 0（缺 keepTurns 退回默认 2）',
+    keepTurnsState(cfg, null).value === 2
+      && keepTurnsState(cfg, { used: 999999 }).value === 2
+      && keepTurnsState({ triggerPct: 0.75 }, null).value === 2
+      && keepTurnsState({ keepTurns: 2 }, { ratio: 0.99 }).value === 2)
+  check('ratio 缺失时用 used / budget 兜底判断（仍是同一条线）',
+    keepTurnsState(cfg, { used: 80000, budget: 100000 }).value === 0)
+  check('低于总长线时真实三层预算（0.19）和增长配置都不参与（只看 triggerPct）',
+    keepTurnsState({ keepTurns: 2, triggerPct: 0.75, budget: { l1: 0.10, l2: 0.06, l3: 0.03 }, notice: { growthTokens: 1 } },
+      { ratio: 0.5, used: 50000, budget: 100000 }).value === 2)
+}
 // 失败判定必须放在文件末尾：以前它被放在中间，后面那批断言失败也不会让进程非零退出。
 if (failed) {
   console.error(`\n${failed} 项失败`)

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, describeResults, foldPending, receiptLines } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline } from '../index.js'
 import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
@@ -249,7 +249,7 @@ await check('到线但没有任何可压位置：改发轮内紧急提示，每�
   assert.equal(s3.agent.followups.length, 0, '压不动时不该叫醒模型开新轮')
   const text = String(inline[0].data.content[0].text)
   assert.match(text, /紧急提示/, '必须标明是紧急提示，不是常规压缩提醒')
-  assert.match(text, /没有可压位置/, '必须说清当前没有可压位置')
+  assert.match(text, /没有达到叫醒门槛的可压位置/, '必须说清当前没有达到叫醒门槛的可压位置')
   assert.match(text, /不要继续扩大这一轮/, '必须要求停止扩大当前轮')
   assert.match(text, /实际输入上限/, '新名字：实际输入上限')
   // 同一轮第 2 步：还停在线上面，不重复写。
@@ -1325,7 +1325,7 @@ await check('S3 回归：到线但区还压不动时走轮内紧急提示，不�
   const inline = onlyKind(session, NOTICE_KIND)
   assert.equal(inline.length, 1, '轮内紧急提示要写进表层')
   assert.match(String(inline[0].data.content[0].text), /紧急提示/)
-  assert.match(String(inline[0].data.content[0].text), /没有可压位置/)
+  assert.match(String(inline[0].data.content[0].text), /没有达到叫醒门槛的可压位置/)
   // 下一轮补到两块、仍然超限：这块区第一次真正可压，必须能报出来。
   session.pushBlock('L1')
   session.used = 920
@@ -1847,6 +1847,117 @@ await check('B3 对照：默认开着时仍然明确点名 session_event_read �
   assert.match(text, /会直接停用/, '没装会话搜索时会停用，这句要保留')
   assert.doesNotMatch(text, /填表顺序按/, 'F3：填表顺序只在 compress 的说明里写一份，系统提示不再重复')
   assert.doesNotMatch(text, /必须同批一起给/, 'F3：级联规矩也只在说明里写一份')
+})
+
+// 2026-11-12 用户 E 待办：占用达到总长线（triggerPct）时，pre-step 的"压得动"判据也必须
+// 按运行时 keepTurns=0 算；否则地图说能压、提醒却仍按保护圈判"压不动"。
+await check('E：占用达到总长线时 pre-step 按 keepTurns=0 判可压，降回线下恢复', async () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'T1 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T1 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T2 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T2 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T3 当前轮' }] },
+  ]
+  const session = fakeSession([5, 10, 11, 20, 21, 30], messages)
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 10000 })
+  session.requestHeader = () => ({ config: { maxTokens: 0 } })
+  const projections = { stateOf: () => ({ turns: [{ turn: 1, seq: 10 }, { turn: 2, seq: 20 }, { turn: 3, seq: 30 }] }) }
+  const ctx = usageCtx(session)
+  const baseGet = ctx.get.bind(ctx)
+  ctx.get = (name) => (name === 'sessionProjections' ? projections : baseGet(name))
+  // 总长线 = 75%；未到线时 keepTurns=2 仍保护最近两轮，到线后运行时按 0。
+  const cfg = { ...DEFAULTS, reservedTokens: 0, keepTurns: 2, triggerPct: 0.75 }
+
+  session.used = 7400 // 74% 未到线，仍按 keepTurns=2 保护
+  const underStep = STEP(3)
+  apply(ctx, cfg)
+  await ctx.handlers.get('agent/pre-step')(underStep, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: underStep.signal }, () => {})
+  assert.equal(underStep.agent.followups.length, 0, '未到线时 keepTurns=2 仍保护最近两轮，l0 压不动，不该叫醒')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '未到线，连紧急提示都不该写')
+
+  const overSession = fakeSession([5, 10, 11, 20, 21, 30], messages)
+  overSession.seq = 1
+  overSession.requestContext = () => ({ contextWindow: 10000 })
+  overSession.requestHeader = () => ({ config: { maxTokens: 0 } })
+  overSession.used = 8000 // 到达 75% 总长线，keepTurns 运行时降 0
+  const overStep = STEP(4)
+  const ctx2 = usageCtx(overSession)
+  const baseGet2 = ctx2.get.bind(ctx2)
+  ctx2.get = (name) => (name === 'sessionProjections' ? projections : baseGet2(name))
+  apply(ctx2, cfg)
+  await ctx2.handlers.get('agent/pre-step')(overStep, () => {})
+  await ctx2.handlers.get('agent/turn-stopping')({ turn: 4, signal: overStep.signal }, () => {})
+  assert.equal(overStep.agent.followups.length, 1, '超过设定线后最近已结束轮进入可压范围，到线应叫醒')
+})
+
+// 同一轮里先由增长触发把 compressible 按 keepTurns=2 缓存，随后占用跨过总长线：
+// 缓存键必须带压缩时的运行时 keepTurns（compressKeep），否则会继续用旧判定发"压不动"提示。
+await check('E：同一轮跨过总长线时 compressKeep 触发重算', async () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'sys' }] },
+    { role: 'user', content: [{ type: 'text', text: 'T1 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T1 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T2 的问题 ' + '原'.repeat(500) }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'T2 的回答 ' + '答'.repeat(500) }] },
+    { role: 'user', content: [{ type: 'text', text: 'T3 当前轮' }] },
+  ]
+  const session = fakeSession([5, 10, 11, 20, 21, 30], messages)
+  session.seq = 1
+  session.requestContext = () => ({ contextWindow: 10000 })
+  session.requestHeader = () => ({ config: { maxTokens: 0 } })
+  const projections = { stateOf: () => ({ turns: [{ turn: 1, seq: 10 }, { turn: 2, seq: 20 }, { turn: 3, seq: 30 }] }) }
+  const ctx = usageCtx(session)
+  const baseGet = ctx.get.bind(ctx)
+  ctx.get = (name) => (name === 'sessionProjections' ? projections : baseGet(name))
+  const cfg = { ...DEFAULTS, reservedTokens: 0, keepTurns: 2, triggerPct: 0.75, notice: { ...DEFAULTS.notice, growthTokens: 50 } }
+  apply(ctx, cfg)
+
+  const step = STEP(3)
+  session.used = 7400
+  await ctx.handlers.get('agent/pre-step')(step, () => {}) // 定基线
+  session.used = 7450 // 未到 75%，增长 50 触发一次，compressible 按 keepTurns=2 缓存
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  assert.equal(step.agent.followups.length, 0, '增长触发但 l0 还被 keepTurns 保护，不该叫醒')
+  session.used = 8000 // 同一轮到达 75%
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 1, '跨线后 compressKeep 变了，必须重算出可压并叫醒（不能沿用旧缓存写“压不动”）')
+})
+
+// 压缩成功后 resetGrowthBaseline 必须清掉“哪层压得动”的旧判定；否则同轮降幅 <5% 时
+// zonesTurn 不作废，余下步骤会继续用压缩前的 compressible（qwen 联动复审 Minor 2）。
+await check('resetGrowthBaseline 清掉 compressible/envBlocked/compressTurn/compressKeep/zonesTurn/zonesOver', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  const cfg = { ...DEFAULTS, reservedTokens: 0 }
+  const st = {
+    tokens: 800,
+    compressible: { l0: true, l1: false, l2: false, l3: false },
+    envBlocked: { l0: false },
+    compressTurn: 3,
+    compressKeep: 2,
+    growthQuota: 500,
+    growthLamp: true,
+    growthPending: 3,
+    zonesTurn: 3,
+    zonesOver: { l1: { used: 999, limit: 1 } },
+    lineOn: false,
+  }
+  const state = new Map([['a1', st]])
+  resetGrowthBaseline(ctx, { id: 'a1' }, cfg, state, () => {})
+  assert.equal(st.compressible, null, 'compressible 必须清')
+  assert.equal(st.envBlocked, null, 'envBlocked 必须清')
+  assert.equal(st.compressTurn, null, 'compressTurn 必须清')
+  assert.equal(st.compressKeep, null, 'compressKeep 必须清')
+  assert.equal(st.zonesTurn, null, 'zonesTurn 区快照必须清')
+  assert.equal(st.zonesOver, null, 'zonesOver 区超限快照必须清')
+  assert.equal(st.lineOn, true, '到线灯按压缩后 ratio 复位')
 })
 
 console.log(`prestep 冒烟测试全部通过（${passed} 项）`)

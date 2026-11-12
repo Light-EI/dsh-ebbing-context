@@ -10,7 +10,7 @@ import { DEFAULTS, NAME, validateConfig, migrateConfig } from './lib/config.js'
 import { renderMap } from './lib/map.js'
 import { estimateTokens } from './lib/tokens.js'
 import { issue, forget } from './lib/license.js'
-import { openCompaction, readZones, zoneOrderFault, worthCompressing } from './lib/blocks.js'
+import { openCompaction, readZones, zoneOrderFault, worthCompressing, keepTurnsState } from './lib/blocks.js'
 import { runCompress } from './lib/compress.js'
 import { userMessage } from './lib/messages.js'
 import { rememberFold, forgetFold, foldCallRecordEx, callNodeOf, FOLD_KIND } from './lib/callfold.js'
@@ -663,6 +663,10 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 会把"每个会话的第一条提醒"永久吃掉（宿主现在恒给数字，这里只防兜底漏洞）。
   if (turn === null) return
   const st = ensureState(ctx, state, id)
+  // 运行时 keepTurns：占用达到总长线（triggerPct）时本步按 0 生效（不写回配置），
+  // 占用回到线下自动恢复。判据与地图/compress 同源，见 blocks.js 的 keepTurnsState()。
+  const keepNow = keepTurnsState(config, usage)
+  const keepTurnsNow = keepNow.value
 
   // 第一次见到这个会话就把"上一次提醒时的量"定为当前量，否则增长触发永远没有基线、开不了口。
   if (st.tokens === null) {
@@ -672,7 +676,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 到线指示灯要在这里维护，不能放到"被叫醒就早退"之后：叫醒轮本来就该跳过登记，
   // 但它在那一轮里可能把占用压到线下、又被下一条大消息顶回线上——早退时跳过复位，
   // 这次"掉下去又越上来"就永远不报了（回归修复）。
-  const aboveLine = usage.ratio >= config.triggerPct
+  const aboveLine = keepNow.auto
   if (!aboveLine && st.lineOn) {
     st.lineOn = false
     // 灯灭要落盘：否则重启后 hydrate 回 true，下一次越线会被当成"还亮着"，
@@ -714,6 +718,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
       // 「压得动」是拿同一份区快照算的：快照作废，这份判断也得跟着重算，
       // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（回归修复）。
       st.compressTurn = null
+      st.compressKeep = null
     }
   }
   // 基线比当前用量还高（宿主 /compact、剪枝、窗口变小）：grew 会长期为负，增长触发
@@ -744,8 +749,9 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 这份结果算出来只会被丢掉。先看这一轮到底有没有理由发提醒；同一轮只算一次。
   const maybeTell = onLine || onGrowth ||
     ['l1', 'l2', 'l3'].some((key) => st.zonesOver && st.zonesOver[key])
-  if (maybeTell && st.compressTurn !== turn) {
+  if (maybeTell && (st.compressTurn !== turn || st.compressKeep !== keepTurnsNow)) {
     st.compressTurn = turn
+    st.compressKeep = keepTurnsNow
     // 第一步：把表层读出来。读失败按用户 2026-11-05 的裁定**降级**（不抛红）：抛出发生在
     // 用户消息已经被 claim 之后，持续故障时每一轮都会吞掉一条用户消息。
     let live = stepZones
@@ -783,7 +789,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     if (live) {
       try {
         st.ambiguous = live.ambiguous === true
-        const keepTurns = typeof config.keepTurns === 'number' ? config.keepTurns : 0
+        const keepTurns = keepTurnsNow
         // 叫醒判据比"结构上可压"更严格：成本估不出来时（拿不到原文正文）就不叫醒，
         // 因为叫醒之后大概率只能换来一次失败（成本口径）。
         st.compressible = {
@@ -910,6 +916,7 @@ function newState() {
     autoTurn: null, ambiguous: false, compressible: null, envBlocked: null, lineOn: false,
     // 「哪一层压得动」是按轮缓存的（回归修复）：只有真要发提醒的那一轮才去估 l0 成本。
     compressTurn: null,
+    compressKeep: null,
     // 增长这条触发自己的两格状态（用户要求 第 2 条）：
     // growthQuota = 当前门槛（null 表示用配置里的原额；压不动时砍到一半）
     // growthLamp  = 增长指示灯（亮着表示"已经在等模型动手"，收尾那步才发得出去）
@@ -1277,7 +1284,7 @@ function lineEmergencyText(usage) {
     '〔Ebbing Context 紧急提示 · 插件注入，不是用户说的话〕\n' +
     OWN_SENTINEL + '\n' +
     (pctText ? `上下文已到 ${pctText}，但` : '上下文已到提醒线，但') +
-    '插件此刻判断当前轮和各层都没有可压位置——现在调用 compress 只会被拒。' +
+    '插件此刻判断当前轮和各层没有达到叫醒门槛的可压位置——现在调用 compress 大概率省不出多少，可能直接被收益校验拒。' +
     '不要继续扩大这一轮：不要读新的大文件或长命令，尽快把当前工作收尾。' +
     '要立刻腾空间只能由用户决定是否用宿主压缩（宿主压缩会把分层拍平），或换一个窗口更大的模型；' +
     '如果你在子代理里，尽快把结果返回父会话。'
@@ -1483,12 +1490,17 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         stepStamps.delete(agent.id)
         sessionAtCall = ctx.sessions.get(agent.id)
         const callSeq = sessionAtCall ? callNodeOf(sessionAtCall, exec.callId) : null
+        // 运行时 keepTurns 必须与地图/pre-step 同源：占用达到总长线（triggerPct）时，
+        // 这一批 compress 的区间校验也按 0 算；不写回配置，下一轮自动恢复。
+        const usageAtCall = sessionAtCall ? readUsage(ctx, sessionAtCall, config) : null
+        const keepNow = keepTurnsState(config, usageAtCall).value
+        const runConfig = keepNow === config.keepTurns ? config : { ...config, keepTurns: keepNow }
         // 同一个 callId 可能跨助手消息复用：先作废旧的待折项，
         // 免得这一次失败时，上一轮成功留下的记录把它折成「已经成功」。
         forgetFold(foldQueueFor(foldQueues, agent.id), exec.callId)
         let result
         try {
-          result = await runCompress(ctx, agent, args || {}, config, log)
+          result = await runCompress(ctx, agent, args || {}, runConfig, log)
         } catch (error) {
           // 兜底：任何没被预料到的异常都要变成一句中文原因，别把 JS 堆栈甩给模型
           result = { ok: false, reason: '压缩时出错了：' + errText(error) }
@@ -1568,8 +1580,10 @@ export function resetGrowthBaseline(ctx, agent, config, state, log) {
     // 同一轮里压缩成功（降幅 <5% 时 zonesTurn 不会作废）后，"哪层压得动"的判定也已经过期；
     // 不清掉会让余下步骤继续用压缩前的乐观/悲观结果，到线不可压的紧急提示因此漏发。
     st.compressTurn = null
+    st.compressKeep = null
     // 占用掉下来了：到线指示灯要按压缩后的实际比例复位，否则"掉下去又越上来"不再报。
-    if (usage && typeof usage.ratio === 'number') st.lineOn = usage.ratio >= config.triggerPct
+    // 与地图/pre-step 用同一个 keepTurnsState().auto，避免第三套“到线”表达式在退化读数下分叉。
+    if (usage) st.lineOn = keepTurnsState(config, usage).auto
     // 落盘必须放在指示灯复位**之后**：以前先落盘再复位，盘上留的是压缩前的 lineOn，
     // 重启后会吞掉一次到线提醒（审查 0883a196 Major 2）。
     persistGrowth(ctx, agent.id, st, log)

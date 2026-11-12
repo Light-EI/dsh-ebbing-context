@@ -134,8 +134,8 @@ window.__ModuleLoader__.load({
       },
       {
         group: '行为', groupEn: 'Behavior', label: '原文区留住最后几轮', labelEn: 'Raw turns kept', path: ['keepTurns'], kind: 'number', step: 1, min: 1, max: 50,
-        detail: '原文区必须留住的最后 N 轮：compress 的 l0 最多只写到「当前轮 − 1 − N」。当前轮本来就压不了；这条是给最近几轮留缓冲，免得刚压完就要按事件号取回原文。',
-        detailEn: 'The last N turns the raw region must keep: compress l0 can only write up to "current turn − 1 − N". The current turn can never be compressed; this buffer keeps the most recent turns intact so raw text does not have to be fetched back by event number right after a compaction.',
+        detail: '原文区必须留住的最后 N 轮：compress 的 l0 最多只写到「当前轮 − 1 − N」。当前轮本来就压不了；这条是给最近几轮留缓冲，免得刚压完就要按事件号取回原文。当前占用达到总长线（triggerPct，默认 75%）时，运行时临时按 0 生效（不写回配置）；占用回到线下自动恢复。',
+        detailEn: 'The last N turns the raw region must keep: compress l0 can only write up to "current turn − 1 − N". The current turn can never be compressed; this buffer keeps the most recent turns intact so raw text does not have to be fetched back by event number right after a compaction. When current usage reaches the total-length line (triggerPct, default 75%), the runtime temporarily uses 0 (without writing back to config) and restores the configured value once usage drops below the line.',
       },
       {
         group: '行为', groupEn: 'Behavior', label: '剪大工具返回', labelEn: 'Prune large tool results', path: ['pruneFirst'], kind: 'boolean',
