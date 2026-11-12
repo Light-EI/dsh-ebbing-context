@@ -108,7 +108,7 @@ await check('按会话 + 日志序号缓存：同一轮里多次读只测一次�
   assert.equal(c.used, 200)
 })
 
-await check('可用输入预算有 10% 下限：输出预留再大，分母也不塌成 0', () => {
+await check('实际输入上限预算有 10% 下限：输出预留再大，分母也不塌成 0', () => {
   const ctx = {
     tokenMeter: { measure: () => ({ totalTokens: 900 }) },
   }

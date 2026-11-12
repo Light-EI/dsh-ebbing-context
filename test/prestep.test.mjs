@@ -282,6 +282,14 @@ await check('step 1：先写轮次标记再写紧急提示，提示不会被算�
   assert.equal(session.appends[1].data.source.kind, NOTICE_KIND, '紧急提示写在标记之后')
 })
 
+await check('notice.enabled=false：常规提醒与轮内紧急提示都停用', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, enabled: false } })
+  await ctx.handlers.get('agent/pre-step')(STEP(3, 1), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '关掉提醒开关就不能写紧急提示')
+})
+
 await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
@@ -1724,8 +1732,9 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   assert.equal(t5.agent.followups.length, 1, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
   assert.match(String(t5.agent.followups[0].content[0].text), /上下文/, '发的应该还是到线提醒')
 })
-await check('没装会话搜索插件：不叫醒（地图与工具都是停用的）', async () => {
-  const session = lineSession(3600)
+await check('没装会话搜索插件：不叫醒（地图、工具与 inline 都停用）', async () => {
+  // 用不可压的会话：确认连轮内紧急提示也被闸门挡住，而不是只挡常规提醒。
+  const session = usageSession(900)
   const ctx = usageCtx(session)
   // 覆盖掉 usageCtx 给的 get：模拟"宿主没装 dsh-tool-session-query"
   ctx.tools = { register: () => () => {}, get: () => undefined }
