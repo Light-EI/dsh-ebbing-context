@@ -925,7 +925,7 @@ async function case20() {
     !/把 keepTurns 调小/.test(String(result && result.reason)) && !/等轮次多了再压/.test(String(result && result.reason)),
     result && result.reason)
   // 20c 走的是 turn > cutoff 分支，旧文案本来就不含"调小"；真正要钉的是 cutoff<1 的空区间分支。
-  const result2 = await runCompress(ctx, agent, { l0: { title: '越界', summary: W(120, '压'), to: 'T1' } }, { ...config, keepTurns: 5 }, logger.fn)
+  const result2 = await runCompress(ctx, agent, { l0: { title: '越界', summary: W(120, '压'), to: 'T1' } }, { ...config, keepTurns: 9 }, logger.fn)
   check('20d · 可压区间为空时拒因说"当前轮永远不可压"，不再劝调小 keepTurns',
     !!(result2 && result2.ok === false) &&
       /当前轮本身永远不可压/.test(String(result2 && result2.reason)) &&

@@ -69,7 +69,7 @@ check('实际输入上限带「窗口 − 输出预留」算式',
   formulaText.split('\n')[0])
 // 10% 地板生效时，budget ≠ 窗口 − 预留：不许摆一个算不平的等式。
 const floorText = renderMap(ctx, agent, config, { used: 90, ratio: 0.9, budget: 100, window: 1000, reserve: 950 }).text
-check('10% 地板时写明「已按窗口 10% 取地板」而不是假等式',
+check('10% 地板时写明「已按窗口 W 的 10% 取地板」而不是假等式',
   /实际输入上限 100（90%；已按窗口 1,000 的 10% 取地板）$/.test(floorText.split('\n')[0]) && !/窗口 1,000 −/.test(floorText.split('\n')[0]),
   floorText.split('\n')[0])
 // ratio 缺失但两分量齐全：算式必须还在括号里，不能裸贴出悬挂的「；」。

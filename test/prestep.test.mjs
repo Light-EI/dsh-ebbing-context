@@ -286,8 +286,11 @@ await check('notice.enabled=false：常规提醒与轮内紧急提示都停用',
   const session = usageSession(900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, enabled: false } })
-  await ctx.handlers.get('agent/pre-step')(STEP(3, 1), () => {})
+  const step = STEP(3, 1)
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '关掉提醒开关就不能写紧急提示')
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
+  assert.equal(step.agent.followups.length, 0, '关掉开关也不该留 pending 到轮末叫醒')
 })
 
 await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
@@ -1733,17 +1736,27 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   assert.match(String(t5.agent.followups[0].content[0].text), /上下文/, '发的应该还是到线提醒')
 })
 await check('没装会话搜索插件：不叫醒（地图、工具与 inline 都停用）', async () => {
-  // 用不可压的会话：确认连轮内紧急提示也被闸门挡住，而不是只挡常规提醒。
+  // 不可压分支：确认连轮内紧急提示也被闸门挡住，而不是只挡常规提醒。
   const session = usageSession(900)
   const ctx = usageCtx(session)
-  // 覆盖掉 usageCtx 给的 get：模拟"宿主没装 dsh-tool-session-query"
   ctx.tools = { register: () => () => {}, get: () => undefined }
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
   assert.equal(step.agent.followups.length, 0, '没有会话搜索时不该叫醒模型')
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '也不许写轮内紧急提示')
+
+  // 压得动分支（C1 原性质）：闸门必须连常规提醒一起挡，不能只挡 inline。
+  const s2 = lineSession(3600)
+  const ctx2 = usageCtx(s2)
+  ctx2.tools = { register: () => () => {}, get: () => undefined }
+  apply(ctx2, LINE_CONFIG)
+  const step2 = STEP(3, 1, { agent: wakeAgent() })
+  await ctx2.handlers.get('agent/pre-step')(step2, () => {})
+  await ctx2.handlers.get('agent/turn-stopping')({ turn: 3, signal: step2.signal }, () => {})
+  assert.equal(step2.agent.followups.length, 0, '没装会话搜索时，压得动也不许叫醒（C1）')
+  assert.equal(onlyKind(s2, NOTICE_KIND).length, 0, '也不许写轮内紧急提示')
 })
 
 await check('读不到表层：pre-step 直接报红（工作对象坏了，不许装作可压）', async () => {
