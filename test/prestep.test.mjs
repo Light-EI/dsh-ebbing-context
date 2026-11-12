@@ -176,9 +176,9 @@ function usageSession(used) {
   return session
 }
 
-// 到线测试需要一个「真压得动」的会话：两个 L1 块，L1 区上限调到 0.5（块合计不越区），
+// 到线测试需要一个「真压得动」的会话：三个 L1 块（zoneRangeCost 取前两块，成本才够地板），L1 区上限调到 0.5（块合计不越区），
 // 窗口 4000、used 3600 = 90% 到线。旧夹具只有一个用户消息，四层全不可压——按 0.2.11 的
-// 闸门会走轮内紧急提示，不再是常规提醒（这是新行为的测试，见后面的 L6/L7）。
+// 闸门会走轮内紧急提示，不再是常规提醒（新行为见本文件后面的 inline 用例）。
 const LINE_CONFIG = { ...DEFAULTS, reservedTokens: 0, budget: { ...DEFAULTS.budget, l1: 0.5 } }
 
 function lineSession(used = 3600) {
@@ -252,9 +252,12 @@ await check('到线但没有任何可压位置：改发轮内紧急提示，每�
   assert.match(text, /没有可压位置/, '必须说清当前没有可压位置')
   assert.match(text, /不要继续扩大这一轮/, '必须要求停止扩大当前轮')
   assert.match(text, /实际输入上限/, '新名字：实际输入上限')
-  // 还停在线上面：不重复写。
-  await ctx.handlers.get('agent/pre-step')(STEP(4, 1, { agent: s3.agent }), () => {})
+  // 同一轮第 2 步：还停在线上面，不重复写。
+  await ctx.handlers.get('agent/pre-step')(STEP(3, 2, { agent: s3.agent }), () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一次越线只提示一次')
+  // 轮末也不该产生 pending / 叫醒（inline 走的是表层，不是 followup）。
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
+  assert.equal(s3.agent.followups.length, 0, 'inline 不产生 pending，轮末不该叫醒')
   // 掉回线下再越线：这是新的一次越线，要再提示一次。
   session.used = 400
   session.seq += 1
@@ -263,6 +266,20 @@ await check('到线但没有任何可压位置：改发轮内紧急提示，每�
   session.seq += 1
   await ctx.handlers.get('agent/pre-step')(STEP(6, 1, { agent: s3.agent }), () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉回线下再越线要重新提示')
+})
+
+await check('step 1：先写轮次标记再写紧急提示，提示不会被算进上一轮', async () => {
+  const session = usageSession(900)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1), () => {})
+  const marks = onlyKind(session, MARKER_KIND)
+  const notices = onlyKind(session, NOTICE_KIND)
+  assert.equal(marks.length, 1, 'step 1 要补本轮标记')
+  assert.match(String(marks[0].data.content[0].text), /本轮 T1/)
+  assert.equal(notices.length, 1, '不可压的到线要写紧急提示')
+  assert.equal(session.appends[0].data.source.kind, MARKER_KIND, '标记必须先写：否则锚点把提示算进上一轮')
+  assert.equal(session.appends[1].data.source.kind, NOTICE_KIND, '紧急提示写在标记之后')
 })
 
 await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
@@ -1307,6 +1324,50 @@ await check('S3 回归：到线但区还压不动时走轮内紧急提示，不�
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal })
   assert.equal(t4.agent.followups.length, 1, '区变得可压后要能报出来（没报过的区不能被提前锁存）')
   assert.match(String(t4.agent.followups[0].content[0].text), /区已超设计容量/)
+})
+
+await check('S3b 回归：line 已投递时，不许把当时压不动的区提前锁存', async () => {
+  // 构造：L1 两块都超区上限，但"可压那段"只有第一块（小）→ 成本不够地板，l1 不可压；
+  // l0 的 T1 可压，所以到线只发 line。下一轮把第一块写大（表层顺序不变）→ l1 可压，
+  // zone-l1 必须能报出来（commit 只按 reasons 锁存，不能把当时不可压的区一起写成已报）。
+  const t1 = { role: 'user', content: [{ type: 'text', text: 'T1 ' + '甲'.repeat(500) }] }
+  const t2 = { role: 'user', content: [{ type: 'text', text: 'T2' }] }
+  const t3 = { role: 'user', content: [{ type: 'text', text: 'T3' }] }
+  const head1 = '〔L1｜T1–T2｜ev 10–20〕第 1 块\n'
+  const b1 = { role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: head1 + '乙'.repeat(10) }] }
+  const b2 = { role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '〔L1｜T1–T2｜ev 21–30〕第 2 块\n' + '丙'.repeat(300) }] }
+  const nodes = [2, 3, 4, 6, 8]
+  const messages = [b1, b2, t1, t2, t3]
+  const session = loggedSession(nodes, messages, [
+    [1, { type: 'turn/start', data: { turn: 1 } }],
+    [2, { type: 'user/message', data: b1 }],
+    [3, { type: 'user/message', data: b2 }],
+    [4, { type: 'user/message', data: t1 }],
+    [5, { type: 'turn/start', data: { turn: 2 } }],
+    [6, { type: 'user/message', data: t2 }],
+    [7, { type: 'turn/start', data: { turn: 3 } }],
+    [8, { type: 'user/message', data: t3 }],
+    [9, { type: 'turn/start', data: { turn: 4 } }],
+  ])
+  session.used = 900
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
+  const t4 = STEP(4, 1)
+  await ctx.handlers.get('agent/pre-step')(t4, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal })
+  assert.equal(t4.agent.followups.length, 1, 'l0 可压，到线要发')
+  assert.doesNotMatch(String(t4.agent.followups[0].content[0].text), /区已超设计容量/, 'l1 还压不动，这一轮不该报区超限')
+  t4.agent.inbox.nextTurn = [] // 模拟宿主已认领上一轮的提醒
+  // 下一轮：把第一块写大（不改表层顺序），并让"用户开口"解除叫醒闸门；l1 变可压。
+  b1.content[0].text = head1 + '乙'.repeat(300)
+  session.log[10] = { type: 'turn/start', data: { turn: 5 } }
+  session.used = 920
+  session.seq += 1
+  const t5 = STEP(5, 1, { agent: t4.agent, messages: [{ role: 'user', source: { kind: 'user' }, content: [] }] })
+  await ctx.handlers.get('agent/pre-step')(t5, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
+  assert.equal(t4.agent.followups.length, 2, 'L1 变得可压后要报 zone-l1')
+  assert.match(String(t4.agent.followups[1].content[0].text), /L1 区已超设计容量/)
 })
 
 await check('G3 回归：被叫醒的那一轮里掉到线下，也要把到线指示灯复位', async () => {

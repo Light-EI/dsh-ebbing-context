@@ -112,6 +112,11 @@ check('keepTurns 只在最后几轮上生效：keep=0 时 T1 可压', resolveTur
 check('keep=1 时第 2 轮已无可压（唯一结束的轮被保住）', !resolveTurnAnchor(zones, 'T1', 1).ok, JSON.stringify(resolveTurnAnchor(zones, 'T1', 1)))
 const kept = resolveTurnAnchor(zones, 'T1', 2)
 check('keepTurns 把可压范围吃光时说清楚"现在才第几轮"', !kept.ok && /可压范围是空的/.test(kept.reason), JSON.stringify(kept))
+// 2026-11-12：不再劝"把 keepTurns 调小 / 等轮次多了再压"——当前轮永远不可压，
+// 这句建议会误导模型；拒因只陈述事实与宿主压缩。
+check('keepTurns 吃光可压范围时不再给"调小 keepTurns"建议',
+  !/把 keepTurns 调小/.test(kept.reason) && !/等轮次多了再压/.test(kept.reason) && /当前轮本身永远不可压/.test(kept.reason),
+  String(kept.reason))
 const wide = { ...zones, currentTurn: 5 }
 check('keepTurns 只挡最近几轮，更早的仍可压', resolveTurnAnchor(wide, 'T1', 2).ok, JSON.stringify(resolveTurnAnchor(wide, 'T1', 2)))
 const rawT4 = { zones: { l0: [{ seq: 1, turn: 4 }], l1: [], l2: [], l3: [] }, currentTurn: 5, turnStarts: [], turnStartIndex: new Map(), nodes: [1] }

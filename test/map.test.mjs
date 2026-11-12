@@ -61,12 +61,22 @@ check('总量并排两个数（宿主口径 + 自估，数值与占比一致）'
   /^上下文 90,000 token（宿主口径）\/ 自估 [\d,]+（[\d.]+%） \/ 实际输入上限 192,000（46\.9%）$/.test(text.split('\n')[0]),
   text.split('\n')[0])
 // 2026-11-12：分母改名「实际输入上限」，并在地图里写出「窗口 − 输出预留」的算式；
-// 只显示派生值会被误当成窗口本身（用户原话：「可用输入是什么鬼东西」）。
+// 只显示派生值会被误当成窗口本身。
 const formulaText = renderMap(ctx, agent, config, { used: 90000, ratio: 90000 / 192000, budget: 192000, window: 200000, reserve: 8000 }).text
 check('实际输入上限带「窗口 − 输出预留」算式',
   /实际输入上限 192,000（46\.9%；= 窗口 200,000 − 输出预留 8,000）$/.test(formulaText.split('\n')[0]) &&
     !/可用输入/.test(formulaText.split('\n')[0]),
   formulaText.split('\n')[0])
+// 10% 地板生效时，budget ≠ 窗口 − 预留：不许摆一个算不平的等式。
+const floorText = renderMap(ctx, agent, config, { used: 90, ratio: 0.9, budget: 100, window: 1000, reserve: 950 }).text
+check('10% 地板时写明「已按窗口 10% 取地板」而不是假等式',
+  /实际输入上限 100（90%；已按窗口 10% 取地板）$/.test(floorText.split('\n')[0]) && !/窗口 1,000 −/.test(floorText.split('\n')[0]),
+  floorText.split('\n')[0])
+// ratio 缺失但两分量齐全：算式必须还在括号里，不能裸贴出悬挂的「；」。
+const noRatioFormula = renderMap(ctx, agent, config, { used: 90000, budget: 192000, ratio: NaN, window: 200000, reserve: 8000 }).text
+check('ratio 缺失时算式仍在括号内、不出现悬挂分号',
+  /实际输入上限 192,000（= 窗口 200,000 − 输出预留 8,000）$/.test(noRatioFormula.split('\n')[0]) && !/；$/.test(noRatioFormula.split('\n')[0]),
+  noRatioFormula.split('\n')[0])
 // 三支边缘：无宿主账单、ratio 缺失、取不到窗口。
 const noUsageText = renderMap(ctx, agent, config, null).text
 check('取不到宿主账单时总量退回自估口径', /插件自估口径/.test(noUsageText.split('\n')[0]), noUsageText.split('\n')[0])

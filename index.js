@@ -360,10 +360,12 @@ export function apply(ctx, rawConfig = {}) {
       dropStaleNotice(pendingByAgent, payload, log)
       // 用户真的开口了：解除「刚叫醒过一轮」的闸，下一轮结束还能再叫醒。
       noteUserSpoke(reminded, payload)
-      if (!quiet && config.notice.enabled) remindIfNeeded(ctx, config, reminded, pendingBySignal, pendingByAgent, payload, log, stepZones)
       // 轮次标记与提醒无关：它就是"这一轮从哪开始"的路标，模型靠它把「压掉 T1–T15」对上号。
       // 正常情况下上一轮收尾已经写好「下一轮 T{N}」；没写（异常收场、会话开头、老历史）这里补。
+      // 必须先于 remindIfNeeded：到线不可压的紧急提示要写在标记之后，否则会被轮次锚点算进
+      // 上一轮（它就落在可压区间里，可能被 to=T{N-1} 一起压掉）。
       if (!quiet) ensureTurnMarker(ctx, reminded, payload, log)
+      if (!quiet && config.notice.enabled) remindIfNeeded(ctx, config, reminded, pendingBySignal, pendingByAgent, payload, log, stepZones)
     } catch (error) {
       // 任何失败都只放弃本次动作，不打断这一轮：插件没有"值得让宿主报红"的错误——
       // 报红发生在用户消息被 claim 之后，等于吞掉用户的话。
@@ -733,7 +735,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   // 既省重复扫描，也免得同一条提醒在几步之间理由来回变。
   if (st.zonesTurn !== turn) {
     st.zonesTurn = turn
-    // 区配额与触发线必须用同一个分母（可用输入预算），否则两套账。
+    // 区配额与触发线必须用同一个分母（实际输入上限预算），否则两套账。
     st.zonesOver = readZoneOver(session, config, usage.budget, stepZones, log)
     st.ambiguous = stepZones ? stepZones.ambiguous === true : false
   }
@@ -812,10 +814,12 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   const envBlocked = st.envBlocked || null
   const anyCompressible = compressible ? Object.values(compressible).some(Boolean) : true
 
-  // 到线但一层都压不动（2026-11-12 用户裁定 A/B1）：常规的「来压缩」提醒只会换来
-  // 一次拒绝，还白叫醒一整轮；改成**轮内**追加一条紧急提示，下一步模型就能看到。
+  // 到线但一层都压不动（0.2.11 的 A/B1 行为）：常规的「来压缩」提醒只会换来
+  // 一次拒绝，还白叫醒一整轮；改成**轮内**追加一条紧急提示。宿主的 buildRequest 在
+  // pre-step 之后才取 deriveMessages，所以本步请求就带上它；step 1 时它位于本轮
+  // 用户消息之上（本轮标记已先写好，不会被算进上一轮）。
   // 只发一次：发送成功就把 lineOn 置位，掉回线下再复位（与常规到线提醒同一套）。
-  // 自检没跑成时 anyCompressible 仍是 true（用户裁定：这是对的），走常规提醒。
+  // 自检没跑成时 anyCompressible 仍是 true（有意的乐观兜底），走常规提醒。
   if (onLine && !anyCompressible) {
     const text = lineEmergencyText(usage)
     if (appendOwn(ctx, id, text, NOTICE_KIND, log)) {
@@ -1264,7 +1268,7 @@ function deliverNotice(ctx, config, state, record, log) {
   }
 }
 
-// 到线却没有任何可压位置时的轮内紧急提示（用户裁定 B1）。
+// 到线却没有任何可压位置时的轮内紧急提示（0.2.11 的 B1 行为）。
 // 它不是「去压缩」的提醒——压不动；它只要求模型停止扩大当前轮，尽快收尾。
 function lineEmergencyText(usage) {
   const pct = Number.isFinite(usage.ratio) ? Math.round(usage.ratio * 1000) / 10 : null
@@ -1275,7 +1279,7 @@ function lineEmergencyText(usage) {
     (pctText ? `上下文已到 ${pctText}，但` : '上下文已到提醒线，但') +
     '插件此刻判断当前轮和各层都没有可压位置——现在调用 compress 只会被拒。' +
     '不要继续扩大这一轮：不要读新的大文件或长命令，尽快把当前工作收尾。' +
-    '要立刻腾空间只能结束这一轮后让宿主压缩（宿主压缩会把分层拍平），或换一个窗口更大的模型；' +
+    '要立刻腾空间只能由用户决定是否用宿主压缩（宿主压缩会把分层拍平），或换一个窗口更大的模型；' +
     '如果你在子代理里，尽快把结果返回父会话。'
   )
 }
@@ -1561,6 +1565,9 @@ export function resetGrowthBaseline(ctx, agent, config, state, log) {
     st.zonesOver = null
     st.compressible = null
     st.envBlocked = null
+    // 同一轮里压缩成功（降幅 <5% 时 zonesTurn 不会作废）后，"哪层压得动"的判定也已经过期；
+    // 不清掉会让余下步骤继续用压缩前的乐观/悲观结果，到线不可压的紧急提示因此漏发。
+    st.compressTurn = null
     // 占用掉下来了：到线指示灯要按压缩后的实际比例复位，否则"掉下去又越上来"不再报。
     if (usage && typeof usage.ratio === 'number') st.lineOn = usage.ratio >= config.triggerPct
     // 落盘必须放在指示灯复位**之后**：以前先落盘再复位，盘上留的是压缩前的 lineOn，
@@ -1761,7 +1768,7 @@ function computeUsage(ctx, session, config) {
     if (used === null) return null
     // 宿主的 contextWindow 是"输入 + 输出"的总窗口，而请求里还要给输出预留 maxTokens。
     // 不扣掉这块预留，75% 这条线会正好压在真实上限上（例如 1M 窗口里预留 256K，真实输入上限只有 ~792K，
-    // 而 75% × 1M = 786K 已经贴着墙了）。所以分母用"可用输入预算"。
+    // 而 75% × 1M = 786K 已经贴着墙了）。所以分母用"实际输入上限预算"。
     const reserve = reservedTokens(ctx, session, config)
     const budget = Math.max(Math.floor(window * 0.1), window - reserve)
     return { ratio: used / budget, used, window, budget, reserve }

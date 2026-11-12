@@ -921,6 +921,9 @@ async function case20() {
   const result = await runCompress(ctx, agent, { l0: { title: '越界', summary: W(120, '压'), to: 'T4' } }, cfg, logger.fn)
   check('20a · 越过保护圈的轮号被拒', !!(result && result.ok === false), show(result && result.ok))
   check('20b · 拒因说清「最多压到 T2」（可写的 to，不是名额上限 T3）', /最多压到 T2/.test(String(result && result.reason)), result && result.reason)
+  check('20c · 拒因不再劝「把 keepTurns 调小 / 等轮次多了再压」',
+    !/把 keepTurns 调小/.test(String(result && result.reason)) && !/等轮次多了再压/.test(String(result && result.reason)),
+    result && result.reason)
 }
 
 

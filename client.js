@@ -154,8 +154,8 @@ window.__ModuleLoader__.load({
       },
       {
         group: '行为', groupEn: 'Behavior', label: '输出预留兜底', labelEn: 'Output reserve fallback', path: ['reservedTokens'], kind: 'number', step: 1000, min: 0,
-        detail: '读不到宿主的输出预留值时，用它扣减可用窗口。0 表示不扣。注意：宿主能给出预留值时这一项不生效。',
-        detailEn: 'Used to subtract from the usable window when the host\'s output reserve value cannot be read. 0 means subtract nothing. Note: this has no effect when the host provides the reserve value.',
+        detail: '读不到宿主的输出预留值时，用它扣减实际输入上限。0 表示不扣。注意：宿主能给出预留值时这一项不生效。',
+        detailEn: 'Used to subtract from the actual input limit when the host\'s output reserve value cannot be read. 0 means subtract nothing. Note: this has no effect when the host provides the reserve value.',
       },
     ]
 
