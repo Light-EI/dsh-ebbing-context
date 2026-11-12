@@ -35,6 +35,9 @@ jobs:
       - name: pack
         run: npm run pack
 
+      - name: stable tarball alias（市场 latest/download 用固定文件名）
+        run: cp dist/dsh-ebbing-context-*.tgz dist/dsh-ebbing-context.tgz
+
       - name: publish to npm（有 NPM_TOKEN 才执行）
         if: ${{ env.NPM_TOKEN != '' }}
         run: npm publish --access public
