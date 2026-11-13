@@ -174,8 +174,8 @@ reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
   total++
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const range = String(pkg.peerDependencies && pkg.peerDependencies['@deepseek-ai/dsh-llm'])
-  if (!range.endsWith('<=0.2.2-rc.2') || /<0\.3(?![.\d])/.test(range)) {
-    console.error(`FAIL peer 兼容上限必须是已核对的 0.2.2-rc.2（不许 <0.3）: ${range}`)
+  if (!range.endsWith('<=0.2.2-rc.3') || /<0\.3(?![.\d])/.test(range)) {
+    console.error(`FAIL peer 兼容上限必须是已核对的 0.2.2-rc.3（不许 <0.3）: ${range}`)
     failed++
   }
 }

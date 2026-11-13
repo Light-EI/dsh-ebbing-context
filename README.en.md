@@ -17,7 +17,7 @@ The older it is, the coarser it gets — but **nothing is ever deleted**. The ra
 
 `ebbing` means "fading away": whether to compress, and how far, is the model's own decision under context pressure — not a scheduled job.
 
-> **Status**: feature-complete, all tests green, and compaction has run on a real machine. What is missing is a **reproducible verification record** — the maps, logs and before/after comparisons were not archived. Target host: DSH 0.2.1-rc.3 ~ 0.2.2-rc.2 (compatibility ceiling 0.2.2-rc.2; newer hosts are rejected at install time). Back up your profile first and try it in a fresh session.
+> **Status**: feature-complete, all tests green, and compaction has run on a real machine. What is missing is a **reproducible verification record** — the maps, logs and before/after comparisons were not archived. Target host: DSH 0.2.1-rc.3 ~ 0.2.2-rc.3 (compatibility ceiling 0.2.2-rc.3; newer hosts are rejected at install time). Back up your profile first and try it in a fresh session.
 > Per-version changes: [CHANGELOG](CHANGELOG.md).
 
 ---
