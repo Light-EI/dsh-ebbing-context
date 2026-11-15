@@ -143,6 +143,10 @@ check('compress 描述说明可压段不等于已完成', schemaSrc.includes('�
 // 参数不是对象时的形状示例同样不能写死一个可被照抄的轮号。
 const shapeHint = checkShape(null)
 check('参数形状示例不写死轮号、指向地图', shapeHint.ok === false && !/T19/.test(shapeHint.reason) && shapeHint.reason.includes('地图'), shapeHint.reason)
+check('形状提示的键序按 l1 → l0（与说明的 l3→l2→l1→l0 一致）', /"l1":\{.*\},"l0":\{/.test(shapeHint.reason), shapeHint.reason)
+// 用户实测的填表错误：把 to 放到整个参数顶层，而不是对应层的对象里。
+const topTo = checkShape({ to: 'T5', l0: { title: 't', summary: 's', to: 'T1' } })
+check('顶层写 to 会被拒', topTo.ok === false && topTo.reason.includes('不认识'), topTo.reason)
 // 地图里「可写 to=T99–T102 / 1–6」是可选范围，不是让照抄整段区间；另一个会话的模型实测抄了区间。
 const rangeL0 = checkShape({ l0: { title: 't', summary: 's', to: 'T99–T102' } })
 check('l0 的 to 写成区间时拒因直接说该写哪个',

@@ -2076,6 +2076,8 @@ await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按�
   assert.match(text, /若装了会话搜索/, '要说清能不能查回来取决于装没装，不能无条件承诺')
   assert.doesNotMatch(text, /按事件号能查回来。/, '不能把一定查得回来说死')
   assert.doesNotMatch(text, /compress 与 context_map 会直接停用/, '开关关掉时不会停用，别这么说')
+  assert.match(text, /不是把摘要写短的理由/, '关会话搜索那支也要钉住同一句')
+  assert.doesNotMatch(text, /摘要写短没关系/, '旧许可句不能回来')
 })
 
 await check('子代理系统提示：说轮内提醒，不再说“收尾叫醒”', async () => {
@@ -2104,8 +2106,62 @@ await check('B3 对照：默认开着时仍然明确点名 session_event_read �
   assert.match(text, /session_event_read/, '默认情况下要告诉模型用哪个工具取回')
   assert.match(text, /会直接停用/, '没装会话搜索时会停用，这句要保留')
   assert.match(text, /按当次提醒和地图的说明继续或收手/, 'root 提示不能与 followup 收手句对撞')
+  assert.match(text, /不是把摘要写短的理由/, '原文可取回不能当写短摘要的借口')
+  assert.doesNotMatch(text, /摘要写短没关系/, '旧许可句不能回来')
+  assert.doesNotMatch(text, /聊天回执/, '不额外加回执格式示例')
   assert.doesNotMatch(text, /填表顺序按/, 'F3：填表顺序只在 compress 的说明里写一份，系统提示不再重复')
   assert.doesNotMatch(text, /必须同批一起给/, 'F3：级联规矩也只在说明里写一份')
+})
+
+await check('compress 的填表语法示例：合法 JSON、to 在层对象里、l3 不写 to', async () => {
+  const session = usageSession(120)
+  const ctx = usageCtx(session)
+  const registered = []
+  ctx.tools = { register: (tool) => (registered.push(tool), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS })
+  const compress = registered.find((tool) => tool.name === 'compress')
+  assert.ok(compress, 'compress 工具要注册')
+  const desc = compress.description
+  assert.match(desc, /填表语法示例/, '要有 tool 参数示例')
+  assert.match(desc, /不是顶层字段/, '明确 to 不是顶层字段')
+  assert.match(desc, /占位符/, '明确示例里的号是占位符')
+
+  const snippets = desc.match(/\{"l\d":\{[^{}]*\}(?:,"l\d":\{[^{}]*\})*\}/g) || []
+  assert.equal(snippets.length, 2, '示例要两段：多键一段、只压 l3 一段')
+  const ORDER = ['l3', 'l2', 'l1', 'l0']
+  for (const snippet of snippets) {
+    const parsed = JSON.parse(snippet)
+    const keys = Object.keys(parsed)
+    assert.deepEqual(keys, ORDER.filter((key) => keys.includes(key)), '示例键序要按“最老的一层先写：l3 → l2 → l1 → l0”')
+    for (const [key, value] of Object.entries(parsed)) {
+      assert.equal(typeof value, 'object', `${key} 的值必须是对象`)
+      assert.ok(!Array.isArray(value), `${key} 的值不能是数组`)
+      assert.equal(typeof value.title, 'string', `${key} 要写 title`)
+      assert.equal(typeof value.summary, 'string', `${key} 要写 summary`)
+      assert.doesNotMatch(String(value.to ?? ''), /\d/, `${key} 的 to 不许出现具体号`)
+    }
+    if ('l3' in parsed) assert.equal(parsed.l3.to, undefined, 'l3 不写 to')
+    else for (const key of Object.keys(parsed)) assert.equal(typeof parsed[key].to, 'string', `${key} 必须写 to`)
+  }
+
+  assert.match(desc, /l0 的 to 写 T 号，l1\/l2 写序号，l3 不写 to/, '占位符含义要说全')
+  const toolText = desc + JSON.stringify(compress.parameters)
+  assert.doesNotMatch(toolText, /\d+\s*%\s*[–-]\s*\d+\s*%/, '不给摘要写长度比例')
+  assert.doesNotMatch(toolText, /\d{3,5}\s*[–-]\s*\d{3,5}\s*(字|token)/, '不给摘要写死字数/token 区间')
+  assert.doesNotMatch(toolText, /\d+\s*字/, '不写死“多少字”')
+  assert.doesNotMatch(toolText, /至少[^\n]{0,12}理由/, '不许回到“至少一条理由”')
+  assert.doesNotMatch('至少要给 l3 / l2 / l1 / l0 里的一个键', /至少[^\n]{0,12}理由/, '合法的“至少要给”不能被误伤')
+  assert.doesNotMatch(desc, /不要只写四行结论/, '不再加这句话')
+
+  const summary = compress.parameters.properties.l3.properties.summary.description
+  const l0Summary = compress.parameters.properties.l0.properties.summary.description
+  assert.match(summary, /每个决定留下理由/, '证据保留规则要留下')
+  assert.match(summary, /按这四行写/, '四行骨架要在')
+  assert.match(summary, /原文很少或信息确实不足时可以短/, '原文很少时可以短这句要保留')
+  assert.match(summary, /四行是结构，不是长度上限/, '四行不是长度上限这句要保留')
+  assert.doesNotMatch(summary, /至少[^\n]{0,12}理由/, '不许回到“至少一条理由”')
+  assert.match(l0Summary, /同 l3 的 summary 规则：四行——/, '一行引用要指得回 l3')
+  assert.match(l0Summary, /删过程流水但保留决策依据、失败原因与关键数据/, '一行引用口径要与 l3 一致')
 })
 
 // 2026-11-12 用户 E 待办：占用达到总长线（triggerPct）时，pre-step 的"压得动"判据也必须
