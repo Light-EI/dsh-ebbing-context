@@ -109,8 +109,8 @@ window.__ModuleLoader__.load({
       },
       {
         group: '提醒', groupEn: 'Reminders', label: '开启提醒', labelEn: 'Enable reminders', path: ['notice', 'enabled'], kind: 'boolean',
-        detail: '提醒的总开关。开着时，插件在每一轮收尾（该叫醒时把模型叫醒）递一条提醒并附上当前地图，让模型自己决定压不压——它从不替模型压缩。关掉就完全不提醒，压缩本身不受影响。',
-        detailEn: 'Master switch for reminders. When on, at the end of each turn (when it is time) the plugin wakes the model with a reminder and the current map, and the model decides whether to compress — it never compresses on the model\'s behalf. Off means no reminders at all; compression itself is unaffected.',
+        detail: '提醒的总开关。开着时：75% 到线在当步轮内直接提醒（主/子代理都一样）；根会话的增长/区超限在轮末叫醒，子代理在每轮开头内联提醒。提醒都附当前地图，让模型自己决定压不压——它从不替模型压缩。关掉就完全不提醒，压缩本身不受影响。',
+        detailEn: 'Master switch for reminders. When on: a 75% line crossing is shown inline in the current step (root and subagent alike); root growth/quota reminders wake the model at turn end, subagent ones are inline at turn start. Every reminder carries the current map and lets the model decide — it never compresses on the model\'s behalf. Off means no reminders; compression itself is unaffected.',
       },
       {
         group: '提醒', groupEn: 'Reminders', label: '增长提醒阈值', labelEn: 'Growth reminder threshold', path: ['notice', 'growthTokens'], kind: 'number', step: 1000, min: 0,
@@ -124,8 +124,8 @@ window.__ModuleLoader__.load({
       },
       {
         group: '提醒', groupEn: 'Reminders', label: '子代理也参与', labelEn: 'Include subagents', path: ['notice', 'notifySubagents'], kind: 'boolean',
-        detail: '开（默认）：子代理按同一套规则被标记与叫醒。它也会碰到已压缩的表层，没有轮次标记就看不出「这块盖住了哪几轮」，压过的信息在它眼里等于丢了。关：子代理不叫醒、不写轮次标记、不报红字。',
-        detailEn: 'On (default): subagents are marked and woken by the same rules. They also see compressed surfaces; without turn markers they cannot tell which turns a block covers, so compressed information is effectively lost to them. Off: subagents are not woken, no turn markers are written, no red errors.',
+        detail: '开（默认）：子代理在每轮开头收到一次内联提醒（到线时当步提醒），不会被另开一轮叫醒。它也会碰到已压缩的表层，没有轮次标记就看不出「这块盖住了哪几轮」，压过的信息在它眼里等于丢了。关：子代理不提醒、不写轮次标记、不报红字，同时松开子代理的压缩轮首闸门（它仍可自行压缩）。',
+        detailEn: 'On (default): a subagent is reminded inline at the start of each turn (line crossings are immediate) and is never woken as a separate turn. It also sees compressed surfaces; without turn markers it cannot tell which turns a block covers. Off: no reminders, no turn markers, no red errors for subagents, and the subagent compress start-of-turn gate is released (it can still compress on its own).',
       },
       {
         group: '提醒', groupEn: 'Reminders', label: '提醒触发占比', labelEn: 'Reminder trigger share', path: ['triggerPct'], kind: 'number', step: 0.01, min: 0.1, max: 0.99,

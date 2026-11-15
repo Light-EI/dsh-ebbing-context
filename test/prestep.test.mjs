@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, RECEIPT_CONTINUE_LINE } from '../index.js'
 import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
@@ -177,8 +177,7 @@ function usageSession(used) {
 }
 
 // 到线测试需要一个「真压得动」的会话：三个 L1 块（zoneRangeCost 取前两块，成本才够地板），L1 区上限调到 0.5（块合计不越区），
-// 窗口 4000、used 3600 = 90% 到线。旧夹具只有一个用户消息，四层全不可压——按 0.2.11 的
-// 闸门会走轮内紧急提示，不再是常规提醒（新行为见本文件后面的 inline 用例）。
+// 窗口 4000、used 3600 = 90% 到线。2026-11-14 起到线统一当步内联，不再分可压/不可压。
 const LINE_CONFIG = { ...DEFAULTS, reservedTokens: 0, budget: { ...DEFAULTS.budget, l1: 0.5 } }
 
 function lineSession(used = 3600) {
@@ -227,31 +226,32 @@ function wakeAgent() {
 // 没有 followup 的形状（拿不到活 agent 时）：提醒退化成尾部追加。
 const plainAgent = { id: 'a1' }
 
-await check('到线：pre-step 只登记，不写节点、也不叫醒', async () => {
+await check('到线：pre-step 当步直接写内联提醒，不叫醒', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '这一步不该写提醒')
-  assert.equal(step.agent.followups.length, 0, '还没到收尾，不该叫醒')
+  const inline = onlyKind(session, NOTICE_KIND)
+  assert.equal(inline.length, 1, '到线要当步写提醒')
+  assert.equal(step.agent.followups.length, 0, '到线不再 followup')
+  assert.equal(onlyKind(session, MARKER_KIND).length, 1, '先写轮次标记')
 })
 
-await check('到线但没有任何可压位置：改发轮内紧急提示，每次越线只发一次', async () => {
+await check('到线即使没有可压位置：也发同一条轮内提醒，每次越线只发一次', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
-  // 第 3 轮第 1 步：没有可压层 → 立即写一条紧急提示（下一步模型就能看到），不排队叫醒。
+  // 第 3 轮第 1 步：没有可压层也发到线提醒（用户 2026-11-14 裁定，不再有“压不动紧急提示”）。
   const s3 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   const inline = onlyKind(session, NOTICE_KIND)
-  assert.equal(inline.length, 1, '不可压的到线要写轮内紧急提示')
-  assert.equal(s3.agent.followups.length, 0, '压不动时不该叫醒模型开新轮')
+  assert.equal(inline.length, 1, '到线要写轮内提醒')
+  assert.equal(s3.agent.followups.length, 0, '到线不叫醒模型开新轮')
   const text = String(inline[0].data.content[0].text)
-  assert.match(text, /紧急提示/, '必须标明是紧急提示，不是常规压缩提醒')
-  assert.match(text, /没有达到叫醒门槛的可压位置/, '必须说清当前没有达到叫醒门槛的可压位置')
-  assert.match(text, /不要继续扩大这一轮/, '必须要求停止扩大当前轮')
-  assert.match(text, /实际输入上限/, '新名字：实际输入上限')
+  assert.match(text, /现在可以压/, '到线提醒要说明可以压')
+  assert.doesNotMatch(text, /紧急提示/, '不再有紧急提示分支')
+  assert.doesNotMatch(text, /不要继续扩大这一轮/, '不再要求停止扩大')
   // 同一轮第 2 步：还停在线上面，不重复写。
   await ctx.handlers.get('agent/pre-step')(STEP(3, 2, { agent: s3.agent }), () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一次越线只提示一次')
@@ -268,7 +268,7 @@ await check('到线但没有任何可压位置：改发轮内紧急提示，每�
   assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉回线下再越线要重新提示')
 })
 
-await check('step 1：先写轮次标记再写紧急提示，提示不会被算进上一轮', async () => {
+await check('step 1：先写轮次标记再写到线提醒，提醒不会被算进上一轮', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
@@ -277,53 +277,43 @@ await check('step 1：先写轮次标记再写紧急提示，提示不会被算�
   const notices = onlyKind(session, NOTICE_KIND)
   assert.equal(marks.length, 1, 'step 1 要补本轮标记')
   assert.match(String(marks[0].data.content[0].text), /本轮 T1/)
-  assert.equal(notices.length, 1, '不可压的到线要写紧急提示')
+  assert.equal(notices.length, 1, '到线要写轮内提醒')
   assert.equal(session.appends[0].data.source.kind, MARKER_KIND, '标记必须先写：否则锚点把提示算进上一轮')
-  assert.equal(session.appends[1].data.source.kind, NOTICE_KIND, '紧急提示写在标记之后')
+  assert.equal(session.appends[1].data.source.kind, NOTICE_KIND, '到线提醒写在标记之后')
 })
 
-await check('notice.enabled=false：常规提醒与轮内紧急提示都停用', async () => {
+await check('notice.enabled=false：常规提醒与到线轮内提醒都停用', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, notice: { ...DEFAULTS.notice, enabled: false } })
   const step = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '关掉提醒开关就不能写紧急提示')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '关掉提醒开关就不能写提醒')
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
   assert.equal(step.agent.followups.length, 0, '关掉开关也不该留 pending 到轮末叫醒')
 })
 
-await check('turn-stopping：走 followup 把模型叫醒（不是写进表层等用户开口）', async () => {
+await check('到线不再 followup：当步写内联提醒，提醒带完整地图', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
-  assert.equal(step.agent.followups.length, 1)
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '叫醒这条路不自己写提醒节点，交给宿主认领时写')
-  assert.match(String(step.agent.followups[0].content[0].text), /上下文已用 90%/)
-  // 提醒必须带**完整地图**（含"压缩须知"、块表、占用），不是只给 to 的那一行数字：
-  // 模型要靠块标题与块大小决定并哪几块。有人为省 token 换成紧凑版时，这条会红。
-  const noticeText = String(step.agent.followups[0].content[0].text)
+  assert.equal(step.agent.followups.length, 0, '到线不再叫醒模型开新轮')
+  const inline = onlyKind(session, NOTICE_KIND)
+  assert.equal(inline.length, 1, '到线提醒写在表层')
+  const noticeText = String(inline[0].data.content[0].text)
+  assert.match(noticeText, /上下文已用 90%/)
   assert.match(noticeText, /压缩须知/, '提醒里必须带完整地图（须知段）')
   assert.doesNotMatch(noticeText, /能压（to 照抄，别自己数）/, '提醒不能用紧凑版顶替完整地图')
-  // 首行必须自报家门：宿主把这条当 user/message 交给模型，不写明就会被当成用户说的话。
   assert.match(noticeText.split('\n')[0], /自动提醒/, '提醒首行必须标明是插件注入的自动提醒')
   assert.match(noticeText.split('\n')[0], /不是用户/, '提醒首行必须说明这不是用户发言')
-  // 来源标记要用宿主已登记的 kind：Client 会把它渲染成「插件状态更新」卡片；
-  // 自造 kind 会落回默认的「收到执行请求」，看着像用户自己发起的请求。
-  assert.equal(step.agent.followups[0].source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
-  // 用户要求（2026-11-05）：一次调用就是一批，别在同一轮里连压多次——提醒正文要收住。
+  assert.equal(inline[0].data.source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
   assert.match(noticeText, /请在一次压缩中完成，不要分多次压缩/, '提醒要明确说"一次压缩完成"')
-  // 用户要求（2026-11-09）：原句「还能压的层一起给完」里的"给完"会被读成"把区间拉满"，
-  // 改成"要压的层一起给全（深浅同批，区间自己权衡）"——层给全，区间不替模型定。
   assert.match(noticeText, /把要压的层一起给全（深浅同批，区间自己权衡/, '级联句要区分"层给全"与"区间大小"')
-  // 用户要求（2026-11-07）：被叫醒只为了压，不能拿它当"继续推进"的许可——
-  // 越过上一轮未决项、或压完转去做别的，都会让未收尾的事悬着。
-  assert.match(noticeText, /压缩专用轮/, '提醒要说明这一轮是压缩专用轮')
-  assert.match(noticeText, /越过上一轮还没收尾的未决项/, '提醒要禁止越过上一轮未决项')
-  assert.match(noticeText, /不要在压缩成功后转做其它任务/, '提醒要禁止压完转做别的任务')
+  assert.match(noticeText, /不要因为这次提醒结束本轮/, '到线提醒不能要求结束本轮')
+  assert.match(noticeText, /继续当前任务/, '到线提醒要求压完继续当前任务')
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
@@ -402,20 +392,19 @@ await check('空表层（首轮、宿主还没写系统头）→ 任何节点都
   assert.equal(session.appends.length, 0, '空表层上任何 append 都不许发生')
 })
 
-await check('只叫醒一轮：被叫醒的那轮不再登记第二条，也不连环叫醒', async () => {
+await check('到线内联不产生 pending：下一轮同一次越线不重复发', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const s3 = STEP(3)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 1)
-  // 下一轮就是被叫醒的那一轮：认领到的消息是我们自己发的那条
-  const s4 = STEP(4, 1, { agent: s3.agent, messages: s3.agent.followups.slice() })
+  assert.equal(s3.agent.followups.length, 0, '到线不 followup')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '当步写一条')
+  const s4 = STEP(4, 1, { agent: s3.agent })
   await ctx.handlers.get('agent/pre-step')(s4, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: s4.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 1, '不能再叫醒一次')
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '同一句话不重复发')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一次越线不重复发')
 })
 
 await check('到线只在越线时报一次：掉回线下再越线才会再报（不在线上反复催）', async () => {
@@ -425,13 +414,13 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
   const s3 = STEP(3)
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 1, '越线时报一条')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '越线时报一条内联')
+  assert.equal(s3.agent.followups.length, 0, '到线不 followup')
   // 一直停在线上面：用户开口了、又过了一轮，也不该再报（设计约束）
   const s4 = STEP(4, 1, { agent: s3.agent, messages: [{ role: 'user', content: [], source: { kind: 'user' } }] })
   await ctx.handlers.get('agent/pre-step')(s4, () => {})
-  s3.agent.inbox.nextTurn = []
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: s4.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 1, '在线上面不该每轮重复报')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '在线上面不该每轮重复报')
   // 掉回线下（压缩后），再越线一次 → 重新亮灯
   session.used = 400
   session.seq += 1
@@ -442,28 +431,269 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
   const s6 = STEP(6, 1, { agent: s3.agent })
   await ctx.handlers.get('agent/pre-step')(s6, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 6, signal: s6.signal }, () => {})
-  assert.equal(s3.agent.followups.length, 2, '掉回线下再越线，要重新报一次')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉回线下再越线，要重新报一次')
 })
 
-await check('上一条提醒还挂在 inbox 里：就地替换，不再排队塞第二条', async () => {
+await check('子代理：轮内到线也在当步内联，不 followup', async () => {
+  const session = lineSession(200)
+  session.id = 'sub-1'
+  session.header = { version: 4, id: 'sub-1', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-1' }) }
+  apply(ctx, LINE_CONFIG)
+  const agent = wakeAgent()
+  agent.id = 'sub-1'
+  agent.session = session
+  const s1 = STEP(1, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(s1, () => {})
+  session.used = 3600
+  session.seq += 1
+  const s2 = STEP(1, 2, { agent })
+  await ctx.handlers.get('agent/pre-step')(s2, () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '子代理轮内到线也要写提醒')
+  assert.equal(agent.followups.length, 0, '子代理到线不 followup')
+  assert.match(String(onlyKind(session, NOTICE_KIND)[0].data.content[0].text), /父会话/, '子代理文案要说明父会话')
+})
+
+await check('子代理：增长/区超限只在 step1 内联，step>1 不追加', async () => {
+  const session = layeredSession(['L1', 'L1'], 260, 100)
+  session.id = 'sub-2'
+  session.header = { version: 4, id: 'sub-2', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-2' }) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, budget: { ...DEFAULTS.budget, l1: 0.5 }, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  agent.id = 'sub-2'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  session.used = 200
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, 'step1 有可压层时应该内联')
+  assert.doesNotMatch(String(onlyKind(session, NOTICE_KIND)[0].data.content[0].text), /任务在这条提醒之后|这是本轮开头/, '不再声明任务与提醒的先后关系')
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, 'step>1 不追加增长提醒')
+  assert.equal(agent.followups.length, 0, '子代理不 followup')
+})
+
+await check('同轮先登记增长、后越线内联：旧 pending 要撤掉，轮末不再 followup', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const signal = new AbortController().signal
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 1, { agent, signal }), () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent, signal }), () => {})
+  session.used = 3600
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 3, { agent, signal }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal }, () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '到线内联一条')
+  assert.equal(agent.followups.length, 0, '同轮旧的增长 pending 不能再到轮末 followup')
+})
+
+await check('根会话被增长叫醒的轮里跨到线：到线仍要内联提醒', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.followups.length, 1, '增长提醒先 followup')
+  const noticesBefore = onlyKind(session, NOTICE_KIND).length
+  // 下一轮是叫醒轮；占用跨到线，不能被 autoTurn 早退吞掉。
+  session.used = 3600
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(6, 1, { agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, noticesBefore + 1, '叫醒轮内跨到线仍要内联提醒')
+  assert.equal(agent.followups.length, 1, '到线不额外 followup')
+})
+
+await check('子代理：理由到 step2 才首次成立，也不能在 step2 内联', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  session.id = 'sub-3'
+  session.header = { version: 4, id: 'sub-3', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-3' }) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, keepTurns: 1, budget: { ...DEFAULTS.budget, l1: 0.5 }, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  agent.id = 'sub-3'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 1, { agent }), () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  session.used = 400
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 3, { agent }), () => {})
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, 'step>1 理由首次成立也不许内联')
+  assert.equal(agent.followups.length, 0, '子代理不 followup')
+})
+
+await check('子代理工具闸门：step>1 且未到线时拒绝 compress', async () => {
+  const session = usageSession(100)
+  session.id = 'sub-gate'
+  session.header = { version: 4, id: 'sub-gate', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-gate' }) }
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99 })
+  const agent = wakeAgent()
+  agent.id = 'sub-gate'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({}, { agent, callId: 'gate-call' })
+  assert.match(String(res.text), /只允许在每轮第 1 步/)
+  assert.doesNotMatch(String(res.text), /压缩须知/, '策略拒绝不带地图')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, 'tool 拒绝不该写提醒')
+})
+
+await check('子代理工具闸门：到线 step>1 允许一次 override', async () => {
+  const session = lineSession(3600)
+  session.id = 'sub-gate-line'
+  session.header = { version: 4, id: 'sub-gate-line', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-gate-line' }) }
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
+  const agent = wakeAgent()
+  agent.id = 'sub-gate-line'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({}, { agent, callId: 'gate-line-call' })
+  assert.doesNotMatch(String(res.text), /只允许在每轮第 1 步/, '到线应放行一次')
+  const res2 = await tool.execute({}, { agent, callId: 'gate-line-call-2' })
+  assert.match(String(res2.text), /已经用过豁免/, '同一 turn 第二次到线压缩必须拒绝')
+})
+
+await check('到线内联触发成功压缩：回执要求继续任务（不是收手）', async () => {
+  const session = lineSession(3600)
+  const ctx = usageCtx(session)
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, LINE_CONFIG)
+  const agent = wakeAgent()
+  const step = STEP(3, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  const mapTool = registered.find((t) => t.name === 'context_map')
+  await mapTool.execute({}, { agent, callId: 'receipt-map-call' })
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({
+    l1: { title: 'A', summary: '并块', to: '2' },
+  }, { agent, callId: 'receipt-continue-call' })
+  assert.match(String(res.text), /压缩完成；继续当前任务/, '到线内联的成功回执必须要求继续任务')
+  assert.match(String(res.text), /本轮不要再压第二次/)
+})
+
+await check('子代理成功压缩：回执必须继续任务，不能收手', async () => {
+  const session = lineSession(3600)
+  session.id = 'sub-receipt'
+  session.header = { version: 4, id: 'sub-receipt', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-receipt' }) }
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, LINE_CONFIG)
+  const agent = wakeAgent()
+  agent.id = 'sub-receipt'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(3, 1, { agent }), () => {})
+  const mapTool = registered.find((t) => t.name === 'context_map')
+  await mapTool.execute({}, { agent, callId: 'sub-receipt-map-call' })
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({
+    l1: { title: 'A', summary: '并块', to: '2' },
+  }, { agent, callId: 'sub-receipt-call' })
+  assert.match(String(res.text), /压缩完成；继续当前任务/, '子代理成功回执必须要求继续任务')
+  assert.match(String(res.text), /最后给结论/)
+})
+
+await check('闸门只拦子代理：根会话 step>1 压缩放行', async () => {
+  const session = usageSession(100)
+  const ctx = usageCtx(session)
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99 })
+  const agent = wakeAgent()
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({}, { agent, callId: 'root-step2-call' })
+  assert.doesNotMatch(String(res.text), /只允许在每轮第 1 步/, 'root 不受子代理闸门')
+})
+
+await check('notice.enabled=false：子代理闸门也放行', async () => {
+  const session = usageSession(100)
+  session.id = 'sub-notice-off'
+  session.header = { version: 4, id: 'sub-notice-off', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-notice-off' }) }
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, enabled: false } })
+  const agent = wakeAgent()
+  agent.id = 'sub-notice-off'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({}, { agent, callId: 'notice-off-call' })
+  assert.doesNotMatch(String(res.text), /只允许在每轮第 1 步/, '关闭提醒时不拦压缩')
+})
+
+await check('子代理工具闸门：notifySubagents=false 时放行', async () => {
+  const session = usageSession(100)
+  session.id = 'sub-quiet'
+  session.header = { version: 4, id: 'sub-quiet', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-quiet' }) }
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.99, notice: { ...DEFAULTS.notice, notifySubagents: false } })
+  const agent = wakeAgent()
+  agent.id = 'sub-quiet'
+  agent.session = session
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(STEP(1, 2, { agent }), () => {})
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({}, { agent, callId: 'gate-quiet-call' })
+  assert.doesNotMatch(String(res.text), /只允许在每轮第 1 步/, 'quiet 子代理放行')
+})
+
+await check('到线内联不碰 inbox：已有旧提醒也照常写表层', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const agent = wakeAgent()
-  // 模拟"上一轮以异常收场、提醒没人认领"：inbox 里留着一条我们的提醒
-  // 必须带哨兵才算'我们写的'（回归修复）：宿主自己的 cordis-host-runner 消息也可能排在这里。
   const stale = { id: 'stale-1', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: '〔Ebbing Context 插件注入〕旧提醒' }], source: { kind: 'cordis-host-runner' } }
   agent.inbox.nextTurn.push(stale)
   const s3 = STEP(3, 1, { agent })
   await ctx.handlers.get('agent/pre-step')(s3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: s3.signal }, () => {})
-  assert.equal(agent.followups.length, 0, '有旧提醒时不该再 followup 一条新的')
-  assert.equal(agent.replaced.length, 1, '应该就地替换旧提醒')
-  assert.equal(agent.inbox.nextTurn.length, 1, '队列里始终只有一条我们的提醒')
-  assert.match(String(agent.inbox.nextTurn[0].content[0].text), /自动提醒/, '替换进去的是这次的新读数')
+  assert.equal(agent.followups.length, 0, '到线不 followup')
+  assert.equal(agent.replaced.length, 0, '到线不走 inbox replace')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '到线写表层')
 })
 
-await check('同一条提醒只发一次：第二次 turn-stopping 不再发', async () => {
+await check('同一条到线提醒只发一次：第二次 turn-stopping 不再发', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
@@ -471,10 +701,10 @@ await check('同一条提醒只发一次：第二次 turn-stopping 不再发', a
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal, agent: step.agent }, () => {})
-  assert.equal(step.agent.followups.length, 1)
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1)
 })
 
-await check('后面一步算出没理由了：撤销待发，收尾不发（照旧数字说话就是说谎）', async () => {
+await check('后面一步算出掉回线下：已经写出的内联提醒不撤回，也不补叫醒', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
@@ -487,20 +717,20 @@ await check('后面一步算出没理由了：撤销待发，收尾不发（照�
   await ctx.handlers.get('agent/pre-step')({ agent, turn: 3, step: 2, signal }, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal }, () => {})
   assert.equal(agent.followups.length, 0)
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '内联提醒已经写出，不撤回')
 })
 
-await check('上一轮以异常收场（turn-stopping 没来）：旧记录直接丢，不拿过期读数说话', async () => {
+await check('上一轮以异常收场（turn-stopping 没来）：内联提醒已落地，不补发第二条', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const agent = wakeAgent()
   await ctx.handlers.get('agent/pre-step')({ agent, turn: 3, step: 1, signal: new AbortController().signal }, () => {})
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1)
   // 没有 turn-stopping，直接进下一轮第一步
   await ctx.handlers.get('agent/pre-step')({ agent, turn: 4, step: 1, signal: new AbortController().signal }, () => {})
-  assert.equal(agent.followups.length, 0, '上一轮那条已经作废，不该补发')
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0)
+  assert.equal(agent.followups.length, 0, '不因异常补发')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '同一越线不重复')
 })
 
 await check('foldPending 真跑一次：折叠成功、写了日志、不抛（ee1fb7e 的回归）', async () => {
@@ -731,17 +961,20 @@ await check('纯增长触发但一层都压不了：不发提醒', async () => {
   assert.equal(second.agent.followups.length, 0, '没有可压的东西时，增长触发不该叫醒模型')
 })
 
-await check('提醒里明确写了「允许不压」与「压完简短回复」', async () => {
+await check('到线提醒明确写了「允许不压」与「压完继续任务」', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
   const step = STEP(3)
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
-  const text = String(step.agent.followups[0].content[0].text)
-  assert.match(text, /这一轮允许什么都不压/, '必须明确允许本轮不采取压缩行动')
-  assert.match(text, /压完只回一两句/, '必须要求压完之后简短回复')
-  assert.match(text, /还没做完/, '必须点名"没做完的事"作为不压的理由')
+  const inline = onlyKind(session, NOTICE_KIND)
+  assert.equal(inline.length, 1)
+  const text = String(inline[0].data.content[0].text)
+  assert.match(text, /压不压由你判断/, '必须明确允许本轮不采取压缩行动')
+  assert.match(text, /压完继续当前任务/, '到线提醒要求压完继续任务')
+  assert.match(text, /不要因为这次提醒结束本轮/, '不能要求结束本轮')
+  assert.doesNotMatch(text, /压完只回一两句/, '不再要求只交回执')
 })
 
 // 多层的假会话：能按层造块，也能在测试中途再加一块（用来验证"压得动了"之后的行为变化）。
@@ -1055,7 +1288,7 @@ await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不�
     const t1 = STEP(1)
     await ctx1.handlers.get('agent/pre-step')(t1, () => {})
     await ctx1.handlers.get('agent/turn-stopping')({ turn: 1, signal: t1.signal }, () => {})
-    assert.equal(t1.agent.followups.length, 1, '越线先报一次')
+    assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '越线先报一次内联')
     assert.equal(readGrowth('session-restart-line') && readGrowth('session-restart-line').lineOn, true, '灯亮着要落盘')
     // 掉回线下：灯灭必须落盘（旧代码只改内存，盘上仍是 true）
     session.used = 400
@@ -1071,7 +1304,7 @@ await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不�
     const t3 = STEP(3)
     await ctx2.handlers.get('agent/pre-step')(t3, () => {})
     await ctx2.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal }, () => {})
-    assert.equal(t3.agent.followups.length, 1, '重启后再次越线必须重新报（灯不能还是亮着）')
+    assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '重启后再次越线必须重新报（灯不能还是亮着）')
   })
 })
 
@@ -1313,19 +1546,19 @@ await check('S2 回归：同一轮里占用明显掉下来（压缩成功）后�
   assert.equal(t3b.agent.followups.length, 0, '压完了就不该再发"还超着"的提醒（否则与同一张地图自相矛盾）')
 })
 
-await check('S3 回归：到线但区还压不动时走轮内紧急提示，不锁存区提醒', async () => {
+await check('S3 回归：到线但区还压不动时也发同一条轮内提醒，不锁存区提醒', async () => {
   const session = layeredSession(['L1'], 400, 900)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
   const t3 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(t3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal })
-  // 0.2.11：到线但一层都压不动 → 不发常规提醒（那只会换来拒绝），改发轮内紧急提示。
-  assert.equal(t3.agent.followups.length, 0, '压不动时不该叫醒模型开新轮')
+  // 2026-11-14：到线不再区分压不压得动，统一发轮内提醒。
+  assert.equal(t3.agent.followups.length, 0, '到线不叫醒模型开新轮')
   const inline = onlyKind(session, NOTICE_KIND)
-  assert.equal(inline.length, 1, '轮内紧急提示要写进表层')
-  assert.match(String(inline[0].data.content[0].text), /紧急提示/)
-  assert.match(String(inline[0].data.content[0].text), /没有达到叫醒门槛的可压位置/)
+  assert.equal(inline.length, 1, '到线提醒要写进表层')
+  assert.match(String(inline[0].data.content[0].text), /现在可以压/)
+  assert.doesNotMatch(String(inline[0].data.content[0].text), /紧急提示/)
   // 下一轮补到两块、仍然超限：这块区第一次真正可压，必须能报出来。
   session.pushBlock('L1')
   session.used = 920
@@ -1366,9 +1599,10 @@ await check('S3b 回归：line 已投递时，不许把当时压不动的区提�
   const t4 = STEP(4, 1)
   await ctx.handlers.get('agent/pre-step')(t4, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 4, signal: t4.signal })
-  assert.equal(t4.agent.followups.length, 1, 'l0 可压，到线要发')
-  assert.doesNotMatch(String(t4.agent.followups[0].content[0].text), /区已超设计容量/, 'l1 还压不动，这一轮不该报区超限')
-  t4.agent.inbox.nextTurn = [] // 模拟宿主已认领上一轮的提醒
+  const lineNotices = onlyKind(session, NOTICE_KIND)
+  assert.equal(lineNotices.length, 1, 'l0 可压，到线要发内联提醒')
+  assert.equal(t4.agent.followups.length, 0, '到线不 followup')
+  assert.doesNotMatch(String(lineNotices[0].data.content[0].text), /区已超设计容量/, 'l1 还压不动，这一轮不该报区超限')
   // 下一轮：把第一块写大（不改表层顺序），并让"用户开口"解除叫醒闸门；l1 变可压。
   b1.content[0].text = head1 + '乙'.repeat(300)
   session.log[10] = { type: 'turn/start', data: { turn: 5 } }
@@ -1377,19 +1611,19 @@ await check('S3b 回归：line 已投递时，不许把当时压不动的区提�
   const t5 = STEP(5, 1, { agent: t4.agent, messages: [{ role: 'user', source: { kind: 'user' }, content: [] }] })
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(t4.agent.followups.length, 2, 'L1 变得可压后要报 zone-l1')
-  assert.match(String(t4.agent.followups[1].content[0].text), /L1 区已超设计容量/)
+  assert.equal(t4.agent.followups.length, 1, 'L1 变得可压后要报 zone-l1')
+  assert.match(String(t4.agent.followups[0].content[0].text), /L1 区已超设计容量/)
 })
 
-await check('G3 回归：被叫醒的那一轮里掉到线下，也要把到线指示灯复位', async () => {
+await check('G3 回归：掉到线下时到线指示灯复位，再越线要重新报', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, triggerPct: 0.75 })
   const t3 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(t3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal })
-  assert.equal(t3.agent.followups.length, 1, '第一次越线要报')
-  // 第 4 轮就是被叫醒的那轮：占用掉到线下（这一步会被 autoTurn 早退，但复位不能被跳过）
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '第一次越线要报')
+  // 第 4 轮占用掉到线下：灯要复位。
   session.used = 400
   session.seq += 1
   const t4 = STEP(4, 1)
@@ -1401,7 +1635,7 @@ await check('G3 回归：被叫醒的那一轮里掉到线下，也要把到线�
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(t5.agent.followups.length, 1, '掉下去又越上来，要当成一次新的越线')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉下去又越上来，要当成一次新的越线')
 })
 
 await check('标记重载去重：上一轮收尾写好的「下一轮 T3」还在表层上，本轮不再补一条', async () => {
@@ -1694,19 +1928,18 @@ await check('rc.2：header 没有 origin/depth 时读运行期 options.subagentD
   })
 })
 
-await check('turn-stopping 载荷没带 agent：不静默，按信号把待发提醒发出去（GLM Minor 1）', async () => {
+await check('turn-stopping 载荷没带 agent：到线内联已经落地，不依赖收尾载荷', async () => {
   await withScratchHome(async () => {
     const session = lineSession(3600)
     const ctx = usageCtx(session)
     ctx.agents = { requireInitiator: () => ({ id: 'a1' }), roots: () => [{ id: 'a1' }] } // rc.1：roots 非空
-    // 必须关掉 notifySubagents：旧代码在 notify=true 时 quiet 恒 false，这条测试就抓不到 bug（审查修复）。
     apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, notice: { ...DEFAULTS.notice, growthTokens: 100000, notifySubagents: false } })
     const t3 = STEP(3, 1)
     await ctx.handlers.get('agent/pre-step')(t3, () => {})
-    assert.equal(t3.agent.followups.length, 0, 'pre-step 只排队，到收尾才投递')
-    // 旧代码在这里 roots.some 无匹配 → 判子代理 → 早退，提醒永远发不出去（更早的 includes 形态同样恒真）
+    assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '到线在 pre-step 已写内联提醒')
     await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal }, () => {})
-    assert.equal(t3.agent.followups.length, 1, '没有 agent 也要按信号投递')
+    assert.equal(t3.agent.followups.length, 0, '不依赖收尾 agent')
+    assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '提醒已经落地')
   })
 })
 
@@ -1717,14 +1950,14 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   const t3 = STEP(3, 1)
   await ctx.handlers.get('agent/pre-step')(t3, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: t3.signal })
-  assert.equal(t3.agent.followups.length, 1, '第一次越线要报')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '第一次越线要报内联')
   // 用户在第二、三轮之间把会话搜索插件关掉，同时占用掉到线下。
   ctx.tools = { register: () => () => {}, get: () => undefined }
   session.used = 400
   session.seq += 1
   const t4 = STEP(4, 1)
   await ctx.handlers.get('agent/pre-step')(t4, () => {})
-  assert.equal(t4.agent.followups.length, 0, '没装会话搜索时不许叫醒')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '没装会话搜索时不许再发')
   // 重新启用，用量再次越线：这一次的到线提醒必须能发出来。
   ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
   session.used = 3600
@@ -1732,11 +1965,10 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(t5.agent.followups.length, 1, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
-  assert.match(String(t5.agent.followups[0].content[0].text), /上下文/, '发的应该还是到线提醒')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
+  assert.match(String(onlyKind(session, NOTICE_KIND)[1].data.content[0].text), /上下文/, '发的应该还是到线提醒')
 })
-await check('没装会话搜索插件：不叫醒（地图、工具与 inline 都停用）', async () => {
-  // 不可压分支：确认连轮内紧急提示也被闸门挡住，而不是只挡常规提醒。
+await check('没装会话搜索插件：不写提醒（地图、工具与到线 inline 都停用）', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)
   ctx.tools = { register: () => () => {}, get: () => undefined }
@@ -1745,7 +1977,7 @@ await check('没装会话搜索插件：不叫醒（地图、工具与 inline �
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
   assert.equal(step.agent.followups.length, 0, '没有会话搜索时不该叫醒模型')
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '也不许写轮内紧急提示')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '也不许写到线提醒')
 
   // 压得动分支（C1 原性质）：闸门必须连常规提醒一起挡，不能只挡 inline。
   const s2 = lineSession(3600)
@@ -1756,20 +1988,20 @@ await check('没装会话搜索插件：不叫醒（地图、工具与 inline �
   await ctx2.handlers.get('agent/pre-step')(step2, () => {})
   await ctx2.handlers.get('agent/turn-stopping')({ turn: 3, signal: step2.signal }, () => {})
   assert.equal(step2.agent.followups.length, 0, '没装会话搜索时，压得动也不许叫醒（C1）')
-  assert.equal(onlyKind(s2, NOTICE_KIND).length, 0, '也不许写轮内紧急提示')
+  assert.equal(onlyKind(s2, NOTICE_KIND).length, 0, '也不许写提醒')
 
-  // 正向对照（顺序必须在上面两条 0 之后）：同一夹具装上会话搜索 → 必须叫醒 1 次。
-  // 没有它，上面两条 0 可能因为前面用例残留 st.lineOn=true 而变成假绿（reminded 是模块级 Map）。
+  // 正向对照（顺序必须在上面两条 0 之后）：同一夹具装上会话搜索 → 必须写一条内联提醒。
   const s3 = lineSession(3600)
   const ctx3 = usageCtx(s3)
   apply(ctx3, LINE_CONFIG)
   const step3 = STEP(3, 1, { agent: wakeAgent() })
   await ctx3.handlers.get('agent/pre-step')(step3, () => {})
   await ctx3.handlers.get('agent/turn-stopping')({ turn: 3, signal: step3.signal }, () => {})
-  assert.equal(step3.agent.followups.length, 1, '对照：装了会话搜索才叫醒；这里若变 0，上面两条 0 就是假绿')
+  assert.equal(onlyKind(s3, NOTICE_KIND).length, 1, '对照：装了会话搜索才提醒；这里若变 0，上面两条 0 就是假绿')
+  assert.equal(step3.agent.followups.length, 0, '提醒走内联，不走 followup')
 })
 
-await check('读不到表层：pre-step 直接报红（工作对象坏了，不许装作可压）', async () => {
+await check('读不到表层：不抛异常、留可见说明（不装作可压）', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
   apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75 })
@@ -1790,10 +2022,10 @@ await check('读不到表层：pre-step 直接报红（工作对象坏了，不�
     threw = error
   }
   assert.equal(threw, null, '不该再抛给宿主')
-  assert.deepEqual(ctx.state ? ctx.state.get('a1').compressible : { l0: false, l1: false, l2: false, l3: false }, { l0: false, l1: false, l2: false, l3: false })
-  // 说明是"尽力而为"：本次 fixture 连 surface 都读不出来，写不进任何节点——这正是
-  // "表层坏了就连提醒都贴不上去"的真实约束。真正能保证的是"不吞消息、不装作可压"。
-  // 能写的时候（例如只是 deriveMessages 坏）会贴一条，见下一条用例。
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '读不出表层时要留一条可见说明')
+  assert.match(String(onlyKind(session, NOTICE_KIND)[0].data.content[0].text), /读不出会话表层/, '说明原因')
+  // 读不出表层时仍会写一条“读不出会话表层”的提示：append 本身不依赖 surface 投影，
+  // 真正保证的是“不吞消息、不装作可压”；下一轮继续也不许抛。
   session.seq += 1
   let threwAgain = null
   try {
@@ -1824,16 +2056,42 @@ await check('成功回执：收手提醒在地图之后、是本组最后一行�
   assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
 })
 
+await check('到线/子代理回执：压完继续任务，不要求收手', async () => {
+  const lines = receiptLines(
+    [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
+    { mapText: '地图', continueLine: true },
+  )
+  assert.equal(lines[lines.length - 1], RECEIPT_CONTINUE_LINE)
+  assert.match(RECEIPT_CONTINUE_LINE, /继续当前任务/)
+  assert.doesNotMatch(RECEIPT_CONTINUE_LINE, /本轮压缩已经完成，请在本轮不要继续压缩/)
+})
+
 await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按事件号能查回来」', async () => {
   const session = usageSession(120)
   const ctx = usageCtx(session)
   const captured = []
   ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
   apply(ctx, { ...DEFAULTS, requireSessionQuery: false })
-  const text = captured.join('')
+  const text = captured.map((t) => (typeof t === 'function' ? t({ agent: { id: 'a1' } }) : t)).join('')
   assert.match(text, /若装了会话搜索/, '要说清能不能查回来取决于装没装，不能无条件承诺')
   assert.doesNotMatch(text, /按事件号能查回来。/, '不能把一定查得回来说死')
   assert.doesNotMatch(text, /compress 与 context_map 会直接停用/, '开关关掉时不会停用，别这么说')
+})
+
+await check('子代理系统提示：说轮内提醒，不再说“收尾叫醒”', async () => {
+  const session = usageSession(100)
+  session.id = 'sub-prompt'
+  session.header = { version: 4, id: 'sub-prompt', createdAt: 0, isSeeded: false, origin: 'subagent' }
+  const ctx = usageCtx(session)
+  ctx.agents = { requireInitiator: () => ({ id: 'sub-prompt' }) }
+  const captured = []
+  ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
+  apply(ctx, { ...DEFAULTS })
+  const agent = { id: 'sub-prompt', session }
+  const text = captured.map((t) => (typeof t === 'function' ? t({ agent }) : t)).join('')
+  assert.match(text, /每轮开头/, '子代理提示要说轮首/轮内')
+  assert.match(text, /不会在轮后另开压缩轮/, '要明确不再轮后开压缩轮')
+  assert.doesNotMatch(text, /一轮收尾把你叫醒一次/, '子代理不能再说收尾叫醒')
 })
 
 await check('B3 对照：默认开着时仍然明确点名 session_event_read 并说明停用规则', async () => {
@@ -1842,9 +2100,10 @@ await check('B3 对照：默认开着时仍然明确点名 session_event_read �
   const captured = []
   ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
   apply(ctx, { ...DEFAULTS })
-  const text = captured.join('')
+  const text = captured.map((t) => (typeof t === 'function' ? t({ agent: { id: 'a1' } }) : t)).join('')
   assert.match(text, /session_event_read/, '默认情况下要告诉模型用哪个工具取回')
   assert.match(text, /会直接停用/, '没装会话搜索时会停用，这句要保留')
+  assert.match(text, /按当次提醒和地图的说明继续或收手/, 'root 提示不能与 followup 收手句对撞')
   assert.doesNotMatch(text, /填表顺序按/, 'F3：填表顺序只在 compress 的说明里写一份，系统提示不再重复')
   assert.doesNotMatch(text, /必须同批一起给/, 'F3：级联规矩也只在说明里写一份')
 })
@@ -1877,7 +2136,7 @@ await check('E：占用达到总长线时 pre-step 按 keepTurns=0 判可压，�
   await ctx.handlers.get('agent/pre-step')(underStep, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: underStep.signal }, () => {})
   assert.equal(underStep.agent.followups.length, 0, '未到线时 keepTurns=2 仍保护最近两轮，l0 压不动，不该叫醒')
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '未到线，连紧急提示都不该写')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '未到线，不该写提醒')
 
   const overSession = fakeSession([5, 10, 11, 20, 21, 30], messages)
   overSession.seq = 1
@@ -1891,7 +2150,8 @@ await check('E：占用达到总长线时 pre-step 按 keepTurns=0 判可压，�
   apply(ctx2, cfg)
   await ctx2.handlers.get('agent/pre-step')(overStep, () => {})
   await ctx2.handlers.get('agent/turn-stopping')({ turn: 4, signal: overStep.signal }, () => {})
-  assert.equal(overStep.agent.followups.length, 1, '超过设定线后最近已结束轮进入可压范围，到线应叫醒')
+  assert.equal(onlyKind(overSession, NOTICE_KIND).length, 1, '超过设定线后最近已结束轮进入可压范围，到线应写提醒')
+  assert.equal(overStep.agent.followups.length, 0, '到线内联，不 followup')
 })
 
 // 同一轮里先由增长触发把 compressible 按 keepTurns=2 缓存，随后占用跨过总长线：
@@ -1927,7 +2187,8 @@ await check('E：同一轮跨过总长线时 compressKeep 触发重算', async (
   session.seq += 1
   await ctx.handlers.get('agent/pre-step')(step, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 3, signal: step.signal }, () => {})
-  assert.equal(step.agent.followups.length, 1, '跨线后 compressKeep 变了，必须重算出可压并叫醒（不能沿用旧缓存写“压不动”）')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 1, '跨线后 compressKeep 变了，必须重算出可压并写提醒（不能沿用旧缓存写“压不动”）')
+  assert.equal(step.agent.followups.length, 0, '到线内联，不 followup')
 })
 
 // 压缩成功后 resetGrowthBaseline 必须清掉“哪层压得动”的旧判定；否则同轮降幅 <5% 时
