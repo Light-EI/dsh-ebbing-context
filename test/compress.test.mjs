@@ -5,7 +5,7 @@
 // 可能夹着原文甚至当前轮。这里直接用假 zones 喂样例，不碰宿主。
 
 import { readFileSync } from 'node:fs'
-import { impureRange, imageLedger, boundaryLine, checkShape } from '../lib/compress.js'
+import { impureRange, imageLedger, boundaryLine, checkShape, normalizeTopLevelTo } from '../lib/compress.js'
 
 let total = 0
 let failed = 0
@@ -162,6 +162,28 @@ const ellL1 = checkShape({ l1: { title: 't', summary: 's', to: '1…8' } })
 check('l1 抄地图的省略号区间时拒因直接说该写 8',
   ellL1.ok === false && ellL1.reason.includes('区间') && ellL1.reason.includes('8'), ellL1.reason)
 check('单个轮号仍然放行', checkShape({ l0: { title: 't', summary: 's', to: 'T102' } }).ok === true)
+
+// 2026-11-16：顶层 to 的零歧义形态自动上提（真机 17 次），单层才挪，其余仍拒。
+const hoist = normalizeTopLevelTo({ l0: { title: 't', summary: 's' }, to: 'T102' })
+check('单层 + 顶层 to 自动挪进层对象',
+  hoist.hoisted && hoist.hoisted.key === 'l0' && hoist.args.to === undefined &&
+    hoist.args.l0.to === 'T102' && checkShape(hoist.args).ok === true,
+  JSON.stringify(hoist))
+const hoistL1 = normalizeTopLevelTo({ l1: { title: 't', summary: 's' }, to: '3' })
+check('l1 的顶层 to 也挪（序号形态）',
+  hoistL1.hoisted && hoistL1.args.l1.to === '3' && checkShape(hoistL1.args).ok === true)
+const multiTop = normalizeTopLevelTo({ l1: { title: 't', summary: 's', to: '1' }, l0: { title: 'a', summary: 'b', to: 'T5' }, to: 'T5' })
+check('多层 + 顶层 to 不挪（不知道属于谁），仍按不认识键拒绝',
+  multiTop.hoisted === null && checkShape(multiTop.args).ok === false && multiTop.args.to === 'T5')
+const l3Top = normalizeTopLevelTo({ l3: { title: 't', summary: 's' }, to: 'T5' })
+check('l3 + 顶层 to 不挪（l3 本来就不写 to）', l3Top.hoisted === null && checkShape(l3Top.args).ok === false)
+const layerHasTo = normalizeTopLevelTo({ l0: { title: 't', summary: 's', to: 'T1' }, to: 'T2' })
+check('层里已有 to 时不挪（同值双写也仍拒）', layerHasTo.hoisted === null && checkShape(layerHasTo.args).ok === false)
+const onlyTop = normalizeTopLevelTo({ to: 'T102' })
+check('只有顶层 to、没有层键时不挪', onlyTop.hoisted === null && checkShape(onlyTop.args).ok === false)
+const nonStringTop = normalizeTopLevelTo({ l0: { title: 't', summary: 's' }, to: 102 })
+check('顶层 to 不是字符串时不挪', nonStringTop.hoisted === null && checkShape(nonStringTop.args).ok === false)
+check('参数不是对象时 normalize 不报错、原样返回', normalizeTopLevelTo(null).args === null && normalizeTopLevelTo([]).hoisted === null)
 if (failed !== 0) process.exitCode = 1
 
 console.log(failed === 0 ? `\ncompress 断言测试全部通过（${total} 项）` : `\ncompress 断言测试失败 ${failed} / ${total}`)

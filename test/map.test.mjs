@@ -56,7 +56,7 @@ check('地图带每层压力表头（含每区占比）', /区域\s+已用（占
 // 总量必须并排两个数：宿主口径 + 插件自估（2026-11-07 用户要求）。压缩成功回执那一刻宿主的数
 // 还带过渡估算，只报一个数会让人以为真实占用高出一大截；并排显示才能互相核对。
 // 断言连数值一起钉：fixture 的 ratio = used/budget，宿主数、自估数、百分比、窗口四段都得在，
-// 只钉格式的话把宿主/自估对调、或把 ratio 换成别的数都照样绿（复审实测）。
+// 只钉格式的话把宿主/自估对调、或把 ratio 换成别的数都照样绿（实测）。
 check('总量并排两个数（宿主口径 + 自估，数值与占比一致）',
   /^上下文 90,000 token（宿主口径）\/ 自估 [\d,]+（[\d.]+%） \/ 实际输入上限 192,000（46\.9%）$/.test(text.split('\n')[0]),
   text.split('\n')[0])
@@ -101,14 +101,24 @@ check('超线时那一行标「⚠已超设计容量」，没超的默认地图�
 check('地图带可压位置段', /可压位置/.test(text))
 check('地图带压缩须知段', /压缩须知/.test(text))
 const subText = renderMap(ctx, agent, config, usage, true).text
-check('子代理地图：须知不说压缩专用轮，改为轮首/到线后继续任务',
-  !/压缩专用轮/.test(subText) && /到线\/轮首提醒后压完继续任务/.test(subText), subText.split('\n').filter((l) => /压缩须知|轮首/.test(l)).join(' ⏎ '))
+check('子代理地图：须知只印子代理那条（压完继续任务、给结论），不说压缩专用轮',
+  !/压缩专用轮/.test(subText) && /子代理的压缩只为腾地方/.test(subText) && /压完继续完成任务，最后一条给结论/.test(subText), subText.split('\n').filter((l) => /压缩须知|子代理/.test(l)).join(' ⏎ '))
 // 须知段的三条硬话（2026-11-14 改）：别压没收尾的、75% 到线轮内提醒、增长/区超限轮后收手、级联同批。
 check('压缩须知：当前轮与进行中步骤绝对不可压，且不许一压到底',
   /当前轮和还需要的轮绝对不可压/.test(text) && /不要一压到底/.test(text) && /拿不准是否收尾就按没收尾处理/.test(text),
   text.split('\n').filter((l) => /压缩须知|绝对不可压/.test(l)).join(' ⏎ '))
-check('压缩须知：75% 到线轮内提醒，增长/区超限轮后收手',
-  /75% 到线是轮内提醒/.test(text) && /增长\/区超限的轮后压缩轮：压完就收手/.test(text) && /越过上一轮还没收尾的未决项/.test(text))
+// 2026-11-16：场景相关的须知只印一条（两条并立是"压完继续干活"事故的根因）。
+// 默认（scene 缺失）按 plain 给中性的继续句，不再并列互斥分支。
+check('压缩须知：默认（无场景）只印继续那条，不并列互斥分支',
+  /压完继续当前任务，不要结束本轮/.test(text) && !/轮末叫醒的压缩专用轮/.test(text) && !/75% 到线是轮内提醒/.test(text),
+  text.split('\n').filter((l) => /压缩须知|压完/.test(l)).join(' ⏎ '))
+const sceneText = (scene, sub = false) => renderMap(ctx, agent, config, usage, sub, null, scene).text
+check('root-wake 须知：只印叫醒那条（收手），不出现“继续当前任务”',
+  /轮末叫醒的压缩专用轮/.test(sceneText('root-wake')) && !/压完继续当前任务/.test(sceneText('root-wake')) && !/75% 到线是轮内提醒/.test(sceneText('root-wake')))
+check('root-line 须知：只印到线那条（继续任务）',
+  /轮内到线提醒：压完继续当前任务/.test(sceneText('root-line')) && !/轮末叫醒的压缩专用轮/.test(sceneText('root-line')))
+check('子代理两种场景的须知同一条（轮首/到线行为一致）',
+  sceneText('sub-start') === sceneText('sub-line') && /子代理的压缩只为腾地方/.test(sceneText('sub-start')))
 // 用户要求（2026-11-09）：地图不能再给「可写 to=T124–T130」这种可照抄形态——模型会把它整个抄进 to。
 // 改成「可写 to 的轮号：T124…T130」，并明确「写哪个号就压到哪个号」。
 // 用户裁定（2026-11-09）：不写"没有理由就写最老的号"（没理由就该不压）、不写"没有把握就取小的"

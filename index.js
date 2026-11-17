@@ -85,7 +85,7 @@ function ebbingPrompt(config, subagent = false) {
       : `本机装了分层压缩。占用到 ${pct}% 时，插件会在轮内直接提醒你（带当前地图）；最近长了一大截或某层超限时，可能在轮末叫醒你。提醒是让你自己判断要不要压：决定压就真的调用 compress（只回一句"我来压缩"不算），压完按当次提醒和地图的说明继续或收手，不要只交回执。`,
     '两个工具：context_map 看当前分层结构和「可压位置」；compress 把最旧的对话折成更短的摘要（填法、级联与上限都写在它的说明与参数里）。',
     '摘要正文由你写进 summary，插件只搬运、不调模型。',
-    '形如〔轮次标记〕的那条消息是插件写的轮次分界线，不是用户说的话：它后面紧跟的内容就是它写的那一轮。压缩时写 to 就照它认轮号。',
+    '形如〔轮次标记〕的那条消息是插件写的轮次分界线，不是用户说的话：它后面紧跟的内容就是它写的那一轮。压缩时 to 的轮号照〔轮次标记〕认；l1/l2 的 to 是块序号，不是轮号。',
     '历史里那些形如〔L1｜T16–T19｜ev 4121–4390〕标题开头的块是压缩结果（这只是格式示例，真实轮次与事件号以地图和块本身为准；括号里是它所在的层、覆盖的轮次、被压掉的事件号范围），是已经成立的事实：直接在它们上面继续做事，不要复述、不要在回复里提它、不要把里面的事重做一遍。',
     config.requireSessionQuery === false
       ? '压掉的原文不会消失（还在会话日志里）。这台机器若装了会话搜索，按事件号能查回来；没装的话原文只在日志文件里。原文可取回，但这不是把摘要写短的理由：摘要要写到「下一轮不取回原文也能继续做事」的程度；只有真需要细节时才按事件号取回。'
@@ -111,6 +111,14 @@ const MARKER_KIND = 'ebbing-context-marker'
 // 折叠短注也是一种"我们自己写的 user/message"。不登记它的话，pre-step 会把它当成
 // 用户真的开口了（foreign 判定），于是下一轮叫醒规则整段失效。
 const OUR_KINDS = new Set([NOTICE_KIND, MARKER_KIND, FOLD_KIND])
+// 宿主自己的非用户消息（不表示"用户开口"）：运行期上下文、模型切换提示、系统提示、
+// 工具注册、PTC 模式、宿主的 compact-checkpoint 检查点；tool/model 是工具/助手来源，
+// 也一并列上，免得将来它们出现在 next-step 时被误判。用户消息（user/user-question-reply/
+// schedule，或没有 source）不在这个集合里——仍按"用户开口"处理（宁可误降，不漏真用户）。
+const HOST_KINDS = new Set([
+  'runtime-context', 'model-selection', 'system-prompt', 'tool-registry', 'ptc-mode',
+  'compact-checkpoint', 'tool', 'model',
+])
 // 插件自己写的每条消息都带这行哨兵（设计约束）：kind 是借来的展示身份，哨兵才是真身份。
 // 宿主的 cordis-host-runner 消息不会带它，所以我们不会把它误认成自己的旧提醒，
 // 也不会把它的文字当成"用户开口了"。
@@ -125,10 +133,10 @@ export function describeResults(results) {
   )
 }
 
-// 成功回执的收手提醒：本轮压完就停，不要在同一轮里再发第二次 compress。
-// 用户要求（2026-11-05）：模型会在同一轮里连压多次——每次压缩都要整段替换表层并重算地图，
-// 连压两回只会把同一轮烧两遍；而且一次调用本来就能把还能压的层一起给完。
-export const RECEIPT_STOP_LINE = '本轮压缩已经完成，请在本轮不要继续压缩。'
+// 成功回执的收手句：轮末叫醒的压缩专用轮到此结束（不是只禁再压——2026-11-16 真机里
+// 模型把「不要继续压缩」读成「可以继续原来的活」，压完连做 9 个工具调用）。
+// 到线内联 / 子代理 / plain（用户轮自行压缩）用 RECEIPT_CONTINUE_LINE。
+export const RECEIPT_STOP_LINE = '压缩完成，本轮到此结束；未决的事留到下一轮。'
 export const RECEIPT_CONTINUE_LINE = '压缩完成；继续当前任务，最后给结论；本轮不要再压第二次，也不要只交压缩回执。'
 
 // 成功回执的正文行：结果行 → 可选说明（剪短、缺轮）→ 刷新后的地图 → 收手提醒。
@@ -207,7 +215,7 @@ export function apply(ctx, rawConfig = {}) {
   const rebuilders = []
   const rebuild = () => {
     for (const dispose of rebuilders.splice(0)) { try { dispose() } catch (e) { /* 单个失败不影响其他的重建 */ } }
-    rebuilders.push(ctx.effect(() => ctx.tools.register(contextMapTool(ctx, config))))
+    rebuilders.push(ctx.effect(() => ctx.tools.register(contextMapTool(ctx, config, reminded))))
     rebuilders.push(ctx.effect(() => ctx.tools.register(compressTool(ctx, config, log, foldQueues, reminded))))
     const prompt = ctx.get('systemPrompt')
     if (prompt) rebuilders.push(ctx.effect(() => prompt.section({
@@ -237,7 +245,11 @@ export function apply(ctx, rawConfig = {}) {
           try {
             const mapSession = ctx.sessions.get(invocation.agent.id)
         const mapUsage = mapSession ? readUsage(ctx, mapSession, config) : null
-        const rendered = renderMap(ctx, invocation.agent, config, mapUsage, isSubagent(ctx, invocation.agent))
+        // 只读命令也可能在叫醒轮里被打：场景必须和提醒/回执同源，否则它会印出
+        // 与"压完就结束本轮"矛盾的「继续当前任务」须知（回归修复）。
+        const mapCurrent = currentSteps.get(invocation.agent.id)
+        const mapScene = sceneOf(ctx, invocation.agent, reminded, mapCurrent ? mapCurrent.turn : null)
+        const rendered = renderMap(ctx, invocation.agent, config, mapUsage, isSubagent(ctx, invocation.agent), null, mapScene)
         // 正向信号：用户 2026-11-05 问「怎么知道读表层成功了」。读失败有错误回执，
         // 成功却什么都不说，于是补一行"读到什么"——数字对不上时也能一眼看出。
         const surfaceLine = (() => {
@@ -368,8 +380,14 @@ export function apply(ctx, rawConfig = {}) {
       // 上一轮以异常/取消收场时 turn-stopping 不会来，那条提醒的信号已经作废。
       // 它记录的是「那一刻」的读数，发出去就是过期信息——直接丢掉，让这一步重新判一次。
       dropStaleNotice(pendingByAgent, payload, log)
-      // 用户真的开口了：解除「刚叫醒过一轮」的闸，下一轮结束还能再叫醒。
-      noteUserSpoke(reminded, payload)
+      // 先确保状态存在（需要时从盘上回灌）：否则重启后第一次 pre-step 里
+      // noteUserSpoke 看不到状态，认领到的提醒就白认了，整轮退化成 plain。
+      if (payload.agent && payload.agent.id) ensureState(ctx, reminded, payload.agent.id)
+      // 用户真的开口了/提醒被认领了：记录本轮场景并落盘（重启后同轮不退化）。
+      // 基线还没定（st.tokens 不是数字）时 persistGrowth 静默跳过，退回既有的“重启后按当前用量起步”降级态。
+      if (noteUserSpoke(reminded, payload) && payload.agent && payload.agent.id) {
+        persistGrowth(ctx, payload.agent.id, reminded.get(payload.agent.id), log)
+      }
       // 轮次标记与提醒无关：它就是"这一轮从哪开始"的路标，模型靠它把「压掉 T1–T15」对上号。
       // 正常情况下上一轮收尾已经写好「下一轮 T{N}」；没写（异常收场、会话开头、老历史）这里补。
       // 必须先于 remindIfNeeded：到线轮内提醒要写在标记之后，否则会被轮次锚点算进
@@ -399,6 +417,7 @@ export function apply(ctx, rawConfig = {}) {
         // 静默子代理也要清超窗计数：它同样会走 request-error 记一笔，而收尾被这里早退，
         // 攒两次就变成"连着两轮超窗"、误停它的自动续作（回归修复）。
         if (payload.agent && payload.agent.id) overflowSaid.delete(payload.agent.id)
+        if (payload.agent && payload.agent.id) currentSteps.delete(payload.agent.id)
         return
       }
       // 收尾前补一次折叠（设计约束）：压缩恰好是本轮最后一个动作时（被截断、
@@ -423,6 +442,9 @@ export function apply(ctx, rawConfig = {}) {
       settleGrowth(ctx, config, reminded, payload, log)
       // 给"下一轮"留路标：这一轮压不压都不影响它，它只是告诉模型下一轮的轮号。
       markNextTurn(ctx, reminded, payload, log)
+      // 这一轮已经收尾：清掉"当前步骤"缓存。否则轮与轮之间（以及叫醒轮收尾后）
+      // 跑 /context-status 会拿上一轮的 turn + 未清的 autoTurn 误判成叫醒轮（回归修复）。
+      if (payload.agent && payload.agent.id) currentSteps.delete(payload.agent.id)
     } catch (error) {
       log('turn-stopping', { error: String((error && error.message) || error) })
     }
@@ -949,6 +971,9 @@ function newState() {
   return {
     turn: null, count: 0, tokens: null, zones: {}, zonesTurn: null, zonesOver: null,
     autoTurn: null, ambiguous: false, compressible: null, envBlocked: null, lineOn: false,
+    // 用户在这一轮的某一步插过话：只用于把"执行场景"从叫醒/到线降成 plain，
+    // 不能拿它替代 autoTurn——autoTurn 还是"同一轮不再叫醒"的闸门（回归修复）。
+    spokeTurn: null,
     // 「哪一层压得动」是按轮缓存的（回归修复）：只有真要发提醒的那一轮才去估 l0 成本。
     compressTurn: null,
     compressKeep: null,
@@ -969,9 +994,54 @@ function newState() {
   }
 }
 
+// 提醒的场景（生成位）：followup 只可能是根会话的轮末叫醒；内联提醒按 audience 与是否到线分。
+// 叫醒轮里跨到线补发的那条到线提醒也判成 root-wake——那一轮本身就是压缩专用轮。
+// 但用户已经在同一轮里插过话时，这一轮已经被用户接管：内联提醒按 plain 给（压完继续），
+// 不能再印「压缩专用轮、压完收手」。
+function sceneFor(record, st, inline) {
+  const subagent = record.audience === 'subagent'
+  const line = record.reasons.includes('line')
+  if (subagent) return line ? 'sub-line' : 'sub-start'
+  if (!inline) return 'root-wake'
+  if (typeof record.turn === 'number' && st.spokeTurn === record.turn) return 'plain'
+  return (typeof record.turn === 'number' && st.autoTurn === record.turn) ? 'root-wake' : 'root-line'
+}
+
+// 场景判定的纯函数（导出给测试钉住）：叫醒 > 到线 > plain；子代理只分轮首/到线。
+// spokeTurn === turn 表示"这一轮里用户插过话"：执行场景一律按 plain（继续任务），
+// 但不动 autoTurn，所以同一轮的叫醒闸门仍然有效。
+export function sceneOfFlags({ subagent = false, turn = null, autoTurn = null, lineInlineTurn = null, spokeTurn = null } = {}) {
+  const hasTurn = typeof turn === 'number'
+  if (subagent) return hasTurn && lineInlineTurn === turn ? 'sub-line' : 'sub-start'
+  if (hasTurn && spokeTurn === turn) return 'plain'
+  if (hasTurn && autoTurn === turn) return 'root-wake'
+  if (hasTurn && lineInlineTurn === turn) return 'root-line'
+  return 'plain'
+}
+
+// 只有轮末叫醒的压缩专用轮才收手；到线/子代理/plain 都要继续任务。
+export function sceneContinues(scene) {
+  return scene !== 'root-wake'
+}
+
+// 压缩执行时的场景（执行位）：叫醒 > 到线 > plain；用户本轮插过话则一律 plain。
+// autoTurn 由 noteUserSpoke 在我们的提醒被认领时写入，之后不再被用户消息清掉；
+// 用户插话只写 spokeTurn，所以回执会说"继续"，而同一轮的叫醒闸门仍然有效。
+function sceneOf(ctx, agent, reminded, turn) {
+  const st = ensureState(ctx, reminded, agent.id)
+  return sceneOfFlags({
+    subagent: isSubagent(ctx, agent),
+    turn,
+    autoTurn: st.autoTurn,
+    lineInlineTurn: st.lineInlineTurn,
+    spokeTurn: st.spokeTurn,
+  })
+}
+
 // ── 增长状态的落盘（重启不清零）────────────────────────────────────────────
-// 为什么只存这三个数：增长线只看"基线用量、当前门槛、到线指示灯"；轮内的东西
-// （growthPending、autoTurn）只对当前这轮有意义，重开后重算即可。
+// 为什么存这几样：增长线看"基线用量、当前门槛、到线指示灯"；场景还要看本轮
+// `autoTurn`（提醒被认领的轮）与 `spokeTurn`（用户插过话的轮），否则叫醒轮中途重启会退化成 plain。
+// `growthPending` 仍只在内存：只对收尾结算有意义；三个场景轮号都已随状态文件落盘。
 // 键是 session.id：agent.id 在重启后可能变，session.id 稳定，且随会话文件走。
 // 两处候选都读不到有效记录时就当"没有存过"——状态丢了只是退回按当前用量起步，绝不能影响主流程。
 // 取状态：没有就建。**建的任何一条路都要先把盘上的基线灌回来**——
@@ -1001,6 +1071,11 @@ export function hydrateGrowth(ctx, id, st) {
     st.tokens = saved.tokens
     st.growthQuota = saved.growthQuota
     st.lineOn = saved.lineOn
+    // 场景状态只在内存里还是空的时候回灌：如果本轮已经由 pre-step 认领过提醒，
+    // 内存值更新，不能被盘上的旧值盖回去。
+    if (st.autoTurn === null && typeof saved.autoTurn === 'number') st.autoTurn = saved.autoTurn
+    if (st.spokeTurn === null && typeof saved.spokeTurn === 'number') st.spokeTurn = saved.spokeTurn
+    if (st.lineInlineTurn === null && typeof saved.lineInlineTurn === 'number') st.lineInlineTurn = saved.lineInlineTurn
     return true
   } catch {
     return false
@@ -1017,6 +1092,9 @@ export function persistGrowth(ctx, id, st, log) {
       tokens: st.tokens,
       growthQuota: typeof st.growthQuota === 'number' ? st.growthQuota : null,
       lineOn: st.lineOn === true,
+      autoTurn: typeof st.autoTurn === 'number' ? st.autoTurn : null,
+      spokeTurn: typeof st.spokeTurn === 'number' ? st.spokeTurn : null,
+      lineInlineTurn: typeof st.lineInlineTurn === 'number' ? st.lineInlineTurn : null,
     })
     // 落盘失败不能全静默：用户重启后发现"累计又清零了"，日志里至少得能查到原因。
     // 成功但退到了临时目录也要记：主目录里那份是旧的，只记在这里才看得出真实位置。
@@ -1195,24 +1273,39 @@ function isOwnNotice(message) {
   return messageTextOf(message).includes(OWN_SENTINEL)
 }
 
-// 认领到的消息里只要有一条不是我们发的，就说明用户（或别的流程）开口了：
-// 解除"刚叫醒过一轮"的闸，下一次收尾还能再叫醒一次。
+// 认领到的消息里只要有一条不是我们发的，就说明用户（或别的流程）开口了。
+// 以前这里直接清 autoTurn，想表达"刚叫醒过一轮的闸解开了"；但 autoTurn 同时是
+// 「同一轮不再叫醒」的闸门（remindIfNeeded 的早退、deliverNotice 的只叫醒一轮），
+// 清掉它会让用户插话后同一轮再冒出第二条增长提醒、轮末再叫醒一次（回归修复）。
+// 现在只记 spokeTurn：场景判定（sceneOf/sceneFor）把它当 plain，闸门不动。
 function noteUserSpoke(state, payload) {
-  if (payload.step !== 1 || !Array.isArray(payload.messages) || payload.messages.length === 0) return
+  if (!Array.isArray(payload.messages) || payload.messages.length === 0) return false
   const id = payload.agent && payload.agent.id
-  if (!id) return
+  if (!id) return false
   const st = state.get(id)
-  if (!st) return
+  if (!st) return false
+  const turn = typeof payload.turn === 'number' ? payload.turn : null
+  let changed = false
   // 我们自己投递的那条提醒被认领了：这一轮就是"被叫醒的那一轮"。
   // 用哨兵认领而不是靠 turn+1 算术：提醒可能排在用户消息后面（用户要求 的 Q2），
   // 算术会指错轮，哨兵不会。
   const woke = payload.messages.some((m) => isOwnNotice(m) && m.source.kind === NOTICE_KIND)
-  if (woke) st.autoTurn = typeof payload.turn === 'number' ? payload.turn : st.autoTurn
-  if (st.autoTurn === null) return
+  if (woke && turn !== null && st.autoTurn !== turn) {
+    st.autoTurn = turn
+    changed = true
+  }
   // 只有'kind 不是我们这类'的消息才算用户开口（回归修复）：宿主自己的 cordis-host-runner
   // 通知与我们同 kind 但不带哨兵，那种既不算我们、也不算用户说话，闸门不能因此解开。
-  const foreign = payload.messages.some((m) => !(m && m.source && OUR_KINDS.has(m.source.kind)))
-  if (foreign) st.autoTurn = null
+  // 任意步都要看：宿主每个 step 都 claim 一次 next-step，用户可以在叫醒轮中途插话。
+  // 但普通用户轮第 1 步认领到的就是用户自己的提问，不是"插话"：只有这一轮本来就是
+  // 叫醒轮（autoTurn === turn）时才记 spokeTurn，否则到线轮的地图会被误降成 plain（回归修复）。
+  const wakeTurn = turn !== null && st.autoTurn === turn
+  const foreign = payload.messages.some((m) => !(m && m.source && (OUR_KINDS.has(m.source.kind) || HOST_KINDS.has(m.source.kind))))
+  if (wakeTurn && foreign && st.spokeTurn !== turn) {
+    st.spokeTurn = turn
+    changed = true
+  }
+  return changed
 }
 
 // 本轮收尾：按信号把这一步之前攒下的那条记录认回来，发出去。
@@ -1260,6 +1353,8 @@ function commitNotice(ctx, st, record, turn, log, inline) {
 // 轮内直接 append（不走 inbox、不 followup）。空表层时 appendOwn 会拒绝，返回 false。
 function deliverInlineNotice(ctx, config, state, record, log) {
   const st = ensureState(ctx, state, record.agentId)
+  // 场景在投递位定：到线提醒可能是叫醒轮里补发的那条（st.autoTurn 已指向本轮）。
+  record.scene = sceneFor(record, st, true)
   const text = noticeText(ctx, config, record, record.count, log)
   if (!appendOwn(ctx, record.agentId, text, NOTICE_KIND, log)) return false
   commitNotice(ctx, st, record, record.turn, log, true)
@@ -1273,8 +1368,14 @@ function deliverNotice(ctx, config, state, record, log) {
   const st = ensureState(ctx, state, id)
 
   const turn = typeof record.turn === 'number' ? record.turn : st.turn
-  const text = noticeText(ctx, config, record, record.count, log)
-  const message = userMessage({ content: [{ type: 'text', text }], source: { kind: NOTICE_KIND } })
+  const agent = record.agent
+  // followup 可用才按"压缩专用轮"渲染；拿不到 followup 就只能尾部追加，
+  // 那条追加会落在上一轮尾部、并不存在一个"这一轮"，所以按 plain 渲染（压完继续），
+  // 不再写「压缩专用轮 / 压完就结束本轮」——否则提醒与回执互相打架。
+  const canWake = !!(agent && typeof agent.followup === 'function')
+  record.scene = canWake ? sceneFor(record, st, false) : 'plain'
+  let text = noticeText(ctx, config, record, record.count, log)
+  let message = userMessage({ content: [{ type: 'text', text }], source: { kind: NOTICE_KIND } })
 
   // 记账放在"真的发出去"之后：先记账会让"投递失败"也算发过，
   // 于是这一轮白算、下一轮 `st.turn !== turn` 又登记又失败，每轮静默重试，
@@ -1284,9 +1385,9 @@ function deliverNotice(ctx, config, state, record, log) {
   // 叫醒模型立刻压（设计约束）：followup 只是把消息排进 inbox 的 next-turn，
   // 宿主在本轮 turn/end 之后看到 inbox 有货就开新的一轮 —— 于是模型被叫醒后先压缩、
   // 用户的下一句话排在它后面，不用干等用户开口。
-  // 只叫醒一轮：这一轮如果本来就是被叫醒的那轮（st.autoTurn === turn），退化成尾部追加；
-  // 否则"读了提醒什么也没压"会让每一轮都再叫醒一次，变成连环烧钱。
-  const agent = record.agent
+  // 只叫醒一轮：`autoTurn` 只在提醒被**真正认领**时（noteUserSpoke）写；投递时不再预测下一轮。
+  // 预测会在取消/清空/排队时留下 stale 轮号，把普通用户轮误判成叫醒轮。
+  let wakeFailed = false
   if (agent && typeof agent.followup === 'function' && st.autoTurn !== turn) {
     // 上一条提醒还躺在 inbox 的 next-turn 里没人认领（例如上一轮以异常收场）：
     // 直接再塞一条会排成两行，而宿主每轮只认领**一条** next-turn，于是要多花一轮才轮到后面那条。
@@ -1295,7 +1396,6 @@ function deliverNotice(ctx, config, state, record, log) {
     if (pending) {
       try {
         if (typeof agent.inbox?.replace === 'function' && agent.inbox.replace(pending.id, message)) {
-          st.autoTurn = (typeof turn === 'number' ? turn : 0) + 1
           commit()
           log('notice-replaced-pending', { agent: id })
           return
@@ -1306,15 +1406,23 @@ function deliverNotice(ctx, config, state, record, log) {
     }
     try {
       agent.followup(message)
-      st.autoTurn = (typeof turn === 'number' ? turn : 0) + 1
       commit()
       return
     } catch (error) {
+      wakeFailed = true
       log('notice-wake-failed', { agent: id, error: String((error && error.message) || error) })
     }
   }
   try {
-    // followup 不可用时的退化路径：直接追加到表层。同样不许在空表层上写（见 appendOwn）。
+    // followup 不可用/失败时的退化路径：直接追加到表层。同样不许在空表层上写（见 appendOwn）。
+    // 追加不是新开一轮，不能按"压缩专用轮"渲染；这里重算成 plain，让提醒与回执都说"继续"。
+    // 仅限真正没法叫醒（没有 followup / followup 抛错）；"本轮已是叫醒轮"的闸门分支
+    // 仍然按 wake 渲染，保持与 STOP 回执一致（该分支当前不可达，见 SPEC §7.6）。
+    if (!canWake || wakeFailed) {
+      record.scene = 'plain'
+      text = noticeText(ctx, config, record, record.count, log)
+      message = userMessage({ content: [{ type: 'text', text }], source: { kind: NOTICE_KIND } })
+    }
     if (surfaceIsEmpty(session, log)) {
       log('append-skip-empty-surface', { agent: id, kind: NOTICE_KIND })
       return
@@ -1337,18 +1445,30 @@ function noticeText(ctx, config, record, count, log) {
   const line = Math.round(config.triggerPct * 100)
   const subagent = record.audience === 'subagent'
   const lineNotice = reasons.includes('line')
+  // 场景在投递位已经算好（deliverNotice / deliverInlineNotice 写进 record.scene）：
+  // root-wake = 轮末叫醒的压缩专用轮（含叫醒轮里跨到线补发的那条到线提醒）。
+  // 旧调用没带 scene 时按原因兜底：根会话的非到线提醒只可能是轮末叫醒。
+  const scene = record.scene || (subagent ? (lineNotice ? 'sub-line' : 'sub-start') : (lineNotice ? 'root-line' : 'root-wake'))
+  const wake = scene === 'root-wake'
   const parts = []
   if (lineNotice) {
     parts.push(`上下文已用 ${pct}%，到了 ${line}% 的提醒线。现在可以压，位置在下面这张地图里。`)
-    parts.push('压完继续当前任务，最后给结论；不要只交压缩回执，也不要因为这次提醒结束本轮。')
-    if (subagent) {
-      parts.push('父会话只收你收尾时的最终输出。')
+    if (wake) {
+      // 叫醒轮里跨线：这一轮仍是压缩专用轮，不能出现"继续当前任务/不要结束本轮"。
+      // wake 恒非子代理（sceneFor 对子代理只给 sub-line/sub-start），这里不再加子代理句。
+    } else {
+      parts.push('压完继续当前任务，最后给结论；不要只交压缩回执，也不要因为这次提醒结束本轮。')
+      if (subagent) {
+        parts.push('父会话只收你收尾时的最终输出。')
+      }
+      parts.push('本轮不要再压第二次。')
     }
-    parts.push('本轮不要再压第二次。')
   }
   if (reasons.includes('growth')) {
     parts.push(`距上次提醒又长了约 ${fmt(grew)} token（现在 ${pct}%）。`)
-    parts.push('这次是「又长了」触发的提醒，不是催你：要压的那几轮如果还没做完、或者内容比较重要，就直接说这一轮不压，按原计划继续。')
+    parts.push(wake
+      ? '这次是「又长了」触发的提醒：这一轮是压缩专用轮，压完就结束本轮，不要继续原来的活。'
+      : '这次是「又长了」触发的提醒，不是催你：要压的那几轮如果还没做完、或者内容比较重要，就直接说这一轮不压，按原计划继续。')
   }
   if (count >= 2 && (reasons.includes('line') || reasons.includes('growth'))) {
     parts.push('距上次提醒又过了一段：如果占用没降，说明上次压得不够；如果降过又涨回来，是新增内容太快。')
@@ -1371,7 +1491,7 @@ function noticeText(ctx, config, record, count, log) {
   // 代价是每轮约 450–690 token（永久留在历史里），这是设计上认过的账。
   let mapText = ''
   try {
-    mapText = renderMap(ctx, record.agent, config, usage, subagent, record.stepZones).text
+    mapText = renderMap(ctx, record.agent, config, usage, subagent, record.stepZones, scene).text
     if (mapText) {
       mapText = '\n\n' + mapText
       issueFor(ctx, record.agent, log, record.stepZones)
@@ -1383,14 +1503,18 @@ function noticeText(ctx, config, record, count, log) {
     if (typeof log === 'function') log('notice-map-failed', { error: errText(error) })
   }
 
-  return (
-    // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
-    // 说清是谁发的、这不是用户发言，模型才不会把提醒里的数字当成用户给的要求。
-    '〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕\n' +
-    // 哨兵：身份判据（isOwnNotice）。借来的 kind 只负责展示，哨兵才说明"这条是我们写的"。
-    OWN_SENTINEL + '\n' +
-    parts.join('') +
-    (lineNotice
+  // 收尾段按场景只给一套，避免"压完继续"与"压完收手"同时出现（2026-11-16 真机事故的根因）。
+  const ending = wake
+    ? '压不压由你判断：要压掉的那几轮里如果有还没做完的事（目标还没收尾、todo 没打完、还在验证、等用户拍板），' +
+      '或者内容接下来明显还要用到，就留着别动——这一轮允许什么都不压。' +
+      '决定要压时：照下面给的位置，一次调用把要压的层一起给全（深浅同批，区间自己权衡；级联与填表顺序见 compress 的说明）。' +
+      '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。' +
+      '请在一次压缩中完成，不要分多次压缩。不压也回一句为什么（例如"还没做完，先留着"），不要沉默，也不要假称压过了。' +
+      // 用户可能在叫醒轮进行中插话（宿主把插话排到下一步认领）。提醒已经进了上下文、
+      // 无法撤回，所以这里预先给出优先级：用户新消息 > 收手。压缩照常，回执会按 plain 继续。
+      '如果这一轮用户又发来新消息，以用户的新消息为准，先办用户的事。' +
+      '压完就结束本轮，只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。'
+    : lineNotice
       ? '压不压由你判断：要压掉的那几轮里如果有还没做完的事（目标还没收尾、todo 没打完、还在验证、等用户拍板），' +
         '或者内容接下来明显还要用到，就留着别动。' +
         '决定要压时：照下面给的位置，一次调用把要压的层一起给全（深浅同批，区间自己权衡；级联与填表顺序见 compress 的说明）。' +
@@ -1405,7 +1529,18 @@ function noticeText(ctx, config, record, count, log) {
           '决定要压时：照下面给的位置，一次调用把要压的层一起给全（深浅同批，区间自己权衡；级联与填表顺序见 compress 的说明）。' +
           '没有可压位置就直接告诉用户这一版压完了，并说明宿主自带压缩会把分层拍平、要不要用由用户决定。' +
           '请在一次压缩中完成，不要分多次压缩。不压也回一句为什么（例如"还没做完，先留着"），不要沉默，也不要假称压过了。' +
-          '压完只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。') +
+          '压完只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。'
+
+  return (
+    // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
+    // 说清是谁发的、这不是用户发言，模型才不会把提醒里的数字当成用户给的要求。
+    '〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕\n' +
+    // 哨兵：身份判据（isOwnNotice）。借来的 kind 只负责展示，哨兵才说明"这条是我们写的"。
+    OWN_SENTINEL + '\n' +
+    // 压缩专用轮标记：模型一眼就能分清"这一轮压完要收手"还是"压完继续干活"。
+    (wake ? '〔这一轮是压缩专用轮：压完就结束本轮〕\n' : '') +
+    parts.join('') +
+    ending +
     mapText
   )
 }
@@ -1460,7 +1595,7 @@ function appendOwn(ctx, agentId, text, kind, log) {
   }
 }
 
-function contextMapTool(ctx, config) {
+function contextMapTool(ctx, config, reminded) {
   return {
     name: 'context_map',
     description:
@@ -1478,7 +1613,11 @@ function contextMapTool(ctx, config) {
       // 先画地图、画成功了才发证：渲染抛错时不能让模型以为"已经看过地图"，
       // 否则它会凭记忆给序号，而许可证照样放行——这道保护就废了。
       const session = ctx.sessions.get(agent.id)
-      const rendered = renderMap(ctx, agent, config, session ? readUsage(ctx, session, config) : null, isSubagent(ctx, agent))
+      // context_map 也是"模型马上要填 to"的入口：场景必须和提醒/回执同源，
+      // 否则同一个会话在叫醒轮里手动看地图会看到"压完继续"的旧须知。
+      const current = currentSteps.get(agent.id)
+      const scene = sceneOf(ctx, agent, reminded, current ? current.turn : null)
+      const rendered = renderMap(ctx, agent, config, session ? readUsage(ctx, session, config) : null, isSubagent(ctx, agent), null, scene)
       if (session) issue(agent.id, session, rendered.zones)
       return { text: rendered.text }
     } catch (error) {
@@ -1494,14 +1633,14 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
   return {
     name: 'compress',
     description:
-      '把旧对话折成更短的摘要，摘要正文由你写在 summary 里。四个键各压一层、产物进上一层：' +
+      '把旧对话折成更短的摘要。参数形状：{"l0":{"to":"T…","title":"…","summary":"…"}}——to 写在层对象里，最外层不放任何东西；多层一次给就把这些层并排放在最外层：{"l3":{…},"l1":{…},"l0":{…}}，每个对象里是 to（l3 除外）、title、summary 三个字段，to 在对象里面。示例里的 … 和 T… 都是占位符，不要照抄。' +
+      '摘要正文由你写在 summary 里。四个键各压一层、产物进上一层：' +
       'l0 的产物是 L1 块，l1 的产物是 L2 块，l2 的产物是 L3 块（落在 L3 区尾部，旧 L3 块原样不动），l3 把整个 L3 区压成一块（唯一不写 to 的键）。' +
       '压缩是自下往上长的：哪一层还是空的，就不能压它上面那一层。' +
       '压哪个键，就必须同批把比它浅、且还能压的层一起压掉，只动深层会整批被拒（某层不足 2 块、或只剩被保护的最后几轮时不用给）。' +
-      'to 只写一个锚点：写最小的号 = 只压最老的一段；写最大的号 = 一次把可压段整段压掉（可压段只是"已结束、不在保护圈"，不代表里面的事都做完了），通常不是默认选择——要压就压已经完成的部分，压到第一个还没收尾的轮次之前就停。' +
+      '每一层的 to 只写一个锚点：写最小的号 = 只压最老的一段；写最大的号 = 一次把可压段整段压掉（可压段只是"已结束、不在保护圈"，不代表里面的事都做完了），通常不是默认选择——要压就压已经完成的部分，压到第一个还没收尾的轮次之前就停。' +
       '别压还没做完的轮次：那一轮里的事还在进行（目标还没收尾、todo 没打完、还在验证、等你拍板）就先留着——压掉之后你只剩自己写的那段摘要。' +
-      '填表按时间线顺序，最老的一层先写：l3 → l2 → l1 → l0。' +
-      '填表语法示例（只示范形状，内容按实际写；示例里的 … 和 T… 都是占位符，不要照抄）：{"l1":{"title":"…","summary":"…","to":"…"},"l0":{"title":"…","summary":"…","to":"T…"}}；只压 l3 时：{"l3":{"title":"…","summary":"…"}}。每个键的值都是一个对象；to 写在对应层的对象里，不是顶层字段；l0 的 to 写 T 号，l1/l2 写序号，l3 不写 to。' +
+      '填表按时间线顺序，最老的一层先写：l3 → l2 → l1 → l0。l0 的 to 写 T 号，l1/l2 写序号，l3 不写 to。' +
       '一次调用可以给多个键，一起给只断一次前缀缓存，所以攒够了一次压。' +
       '调用时要单独发：同一条消息里只发 compress，不要跟别的工具并行发（后台任务继续跑不算并行）。' +
       `正文单块上限按产物层算（token，不是字数）：压 l0 得到的 L1 块 ${seg.l1}、压 l1 得到的 L2 块 ${seg.l2}、压 l2/l3 得到的 L3 块 ${seg.l3}。` +
@@ -1580,6 +1719,8 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
           // 兜底：任何没被预料到的异常都要变成一句中文原因，别把 JS 堆栈甩给模型
           result = { ok: false, reason: '压缩时出错了：' + errText(error) }
         }
+      // 回执与回执里的地图用同一个场景（执行位）：叫醒轮里连拒绝回执也不能出现"继续"的旧须知。
+      const scene = sceneOf(ctx, agent, reminded, current ? current.turn : null)
       if (!result.ok) {
         log('compress-rejected', { reason: result.reason, applied: result.applied === true, keys: Object.keys(args || {}) })
         // 回执说"失败"但块其实已经落地（end 补不上那一路）：基线要照常重设，
@@ -1594,7 +1735,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
         // "地图必调"是同一件事的两面：模型要改对参数，必须先看到**块标题、每层压力、
         // 可压区间**这三样——只给一行 to 的数字，它不知道错在哪、为什么错，只能再撞一次。
         // 代价（450–690 token/次）是设计上认过的账，不许拿"省 token"当理由改成紧凑版。
-        const mapText = fullMap(ctx, agent, config, log)
+        const mapText = fullMap(ctx, agent, config, log, scene)
         if (mapText) issueFor(ctx, agent, log)
         return {
           text: `没能压缩：${result.reason}${landed}` +
@@ -1606,14 +1747,14 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       // 注意顺序：刷新后的地图必须在 rememberFold **之前**并进 lines，否则它跟着被折掉的结果一起消失——
       // 模型既看不到地图，又以为"地图随结果来了"，下一次照旧位置压，必被拒。
       // 设计稿 §2.7 / §11 要求压缩成功也带刷新后的地图（ae398aa 起就是行为约定）。
-      const mapText = fullMap(ctx, agent, config, log)
+      const mapText = fullMap(ctx, agent, config, log, scene)
       const lines = receiptLines(result.results, {
         prunedChars: result.prunedChars,
         // 切点跨过了缺轮：说明一句，免得块头标签（只写到 to）看起来像漏压了内容。
         swallowed: result.results.flatMap((r) => (Array.isArray(r.swallowed) ? r.swallowed : [])),
         mapText,
-        // 子代理/到线内联提醒触发的压缩不是“压缩专用轮”：回执照样要模型继续任务。
-        continueLine: subagent || (current && ensureState(ctx, reminded, agent.id).lineInlineTurn === current.turn),
+        // 只有轮末叫醒的压缩专用轮用"到此结束"；到线/子代理/plain（用户轮自行压缩）都要继续任务。
+        continueLine: sceneContinues(scene),
       })
       if (mapText) issueFor(ctx, agent, log)
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
@@ -1684,11 +1825,11 @@ function issueFor(ctx, agent, log, zones = null) {
 // 完整地图（块表 + 每层压力 + 可压区间 + 须知）。提醒、拒绝回执、成功回执三处共用同一份。
 // 设计稿 §11「提醒里直接带地图」与 §2.7「地图必调」是同一件事的两面：模型的 `to`
 // 只能从一张现算的地图里抄，而这三种时刻恰好都是"它马上要填表"的时刻。
-function fullMap(ctx, agent, config, log) {
+function fullMap(ctx, agent, config, log, scene = null) {
   try {
     const session = ctx.sessions.get(agent.id)
     const usage = session ? readUsage(ctx, session, config) : null
-    return renderMap(ctx, agent, config, usage, isSubagent(ctx, agent)).text || ''
+    return renderMap(ctx, agent, config, usage, isSubagent(ctx, agent), null, scene).text || ''
   } catch (error) {
     // 回执里少一张地图，模型就只能凭记忆压——这种退化必须能在日志里看见。
     if (typeof log === 'function') log('full-map-failed', { error: errText(error) })
@@ -1717,13 +1858,14 @@ function blockSpec(desc, needTo, titleLimit, rich, toText) {
     '不要写"如上所述"这类跨块引用，下次压缩后它会失效。' +
     '注意：更早的摘要里已经有的内容，只有在那个块这次不会被一起压掉时才能省；如果它就在你这次压掉的块里，必须写进新摘要。' +
     '只记事实和状态，不要写成一段对话：没真发出去的回复不要写成已发送，也不要列"已回答"这类清单。'
-  const properties = {
-    title: { type: 'string', description: rich ? titleFull : `同 l3 的 title：一个短名词短语，上限 ${titleLimit} token。` },
-    summary: { type: 'string', description: rich ? summaryFull : '同 l3 的 summary 规则：四行——用户意图 / 模型实际执行（含失败的尝试和原因）/ 运行结论（附件写全路径或地址）/ 数据；删过程流水但保留决策依据、失败原因与关键数据。' },
-  }
+  // 属性顺序：to 放第一位。模型是按 schema 顺序生成参数的，to 放最后时它写完长摘要就收尾、
+  // 把 to 掉了（真机 7 次漏写 / 17 次写到顶层）；放到第一位等于让它先写地址再写正文。
+  const properties = {}
   if (needTo) {
     properties.to = { type: 'string', description: toText }
   }
+  properties.title = { type: 'string', description: rich ? titleFull : `同 l3 的 title：一个短名词短语，上限 ${titleLimit} token。` }
+  properties.summary = { type: 'string', description: rich ? summaryFull : '同 l3 的 summary 规则：四行——用户意图 / 模型实际执行（含失败的尝试和原因）/ 运行结论（附件写全路径或地址）/ 数据；删过程流水但保留决策依据、失败原因与关键数据。' }
   // 嵌套层的必填用数组（见上方注释）：否则 provider 会看到 `required: true`。
   return { type: 'object', properties, required: Object.keys(properties), description: desc }
 }

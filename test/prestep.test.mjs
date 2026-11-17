@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, RECEIPT_CONTINUE_LINE } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, sceneContinues, sceneOfFlags, RECEIPT_CONTINUE_LINE } from '../index.js'
 import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
@@ -226,6 +226,10 @@ function wakeAgent() {
 // 没有 followup 的形状（拿不到活 agent 时）：提醒退化成尾部追加。
 const plainAgent = { id: 'a1' }
 
+// 宿主在下一轮第 1 步认领 next-turn 提醒。autoTurn 只在真正认领时写，
+// 所以凡是要验叫醒轮场景的测试，都必须把 followup 排出去的那条消息放进 claims。
+const claimWake = (turn, agent, extra = {}) => STEP(turn, 1, { agent, messages: [agent.followups.at(-1)], ...extra })
+
 await check('到线：pre-step 当步直接写内联提醒，不叫醒', async () => {
   const session = lineSession(3600)
   const ctx = usageCtx(session)
@@ -314,6 +318,8 @@ await check('到线不再 followup：当步写内联提醒，提醒带完整地�
   assert.match(noticeText, /把要压的层一起给全（深浅同批，区间自己权衡/, '级联句要区分"层给全"与"区间大小"')
   assert.match(noticeText, /不要因为这次提醒结束本轮/, '到线提醒不能要求结束本轮')
   assert.match(noticeText, /继续当前任务/, '到线提醒要求压完继续当前任务')
+  assert.doesNotMatch(noticeText, /压缩专用轮/, '到线轮不是压缩专用轮，不能打收手标记')
+  assert.doesNotMatch(noticeText, /轮末叫醒的压缩专用轮/, '到线轮的地图不能印叫醒须知')
 })
 
 await check('拿不到活 agent（没有 followup）：退化成尾部追加', async () => {
@@ -326,6 +332,62 @@ await check('拿不到活 agent（没有 followup）：退化成尾部追加', a
   const noticed = onlyKind(session, NOTICE_KIND)
   assert.equal(noticed.length, 1)
   assert.equal(noticed[0].opts.surfaceOp, 'append')
+})
+
+await check('followup 不可用：尾部追加按 plain 渲染，不写压缩专用轮标记', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const s1 = STEP(5, 1, { agent: plainAgent })
+  await ctx.handlers.get('agent/pre-step')(s1, () => {})
+  session.used = 300
+  session.seq += 1
+  const s2 = STEP(5, 2, { agent: plainAgent })
+  await ctx.handlers.get('agent/pre-step')(s2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: s2.signal }, () => {})
+  const noticed = onlyKind(session, NOTICE_KIND)
+  assert.equal(noticed.length, 1, '退化路径只追加一条')
+  assert.equal(noticed[0].opts.surfaceOp, 'append')
+  const text = String(noticed[0].data.content[0].text)
+  assert.doesNotMatch(text, /压缩专用轮/, '追加不是新开一轮，不能写压缩专用轮标记')
+  assert.doesNotMatch(text, /压完就结束本轮/, '追加不能要求结束本轮')
+  assert.match(text, /按原计划继续/, '追加按 plain 继续')
+  assert.match(text, /压完继续当前任务/, '地图也是 plain 须知')
+})
+
+await check('followup 抛错：也走尾部追加，且按 plain 渲染', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  let tried = 0
+  const badAgent = {
+    id: 'a1',
+    inbox: { nextTurn: [] },
+    followup() {
+      tried += 1
+      throw new Error('followup unavailable')
+    },
+  }
+  const s1 = STEP(5, 1, { agent: badAgent })
+  await ctx.handlers.get('agent/pre-step')(s1, () => {})
+  session.used = 300
+  session.seq += 1
+  const s2 = STEP(5, 2, { agent: badAgent })
+  await ctx.handlers.get('agent/pre-step')(s2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: s2.signal }, () => {})
+  assert.equal(tried, 1, '先试过 followup')
+  const noticed = onlyKind(session, NOTICE_KIND)
+  assert.equal(noticed.length, 1, 'followup 抛错后仍要追加一条')
+  assert.equal(noticed[0].opts.surfaceOp, 'append')
+  const text = String(noticed[0].data.content[0].text)
+  assert.doesNotMatch(text, /压缩专用轮/, 'followup 抛错后不能保留 wake 标记')
+  assert.doesNotMatch(text, /压完就结束本轮/, 'followup 抛错后不能要求结束本轮')
+  assert.match(text, /按原计划继续/, 'followup 抛错后按 plain 继续')
+  assert.match(text, /压完继续当前任务/, '地图按 plain')
 })
 
 // ── 轮次标记：模型靠它把「压掉 T1–T15」和表层里那一段对上号 ──────────────
@@ -434,6 +496,26 @@ await check('到线只在越线时报一次：掉回线下再越线才会再报�
   assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '掉回线下再越线，要重新报一次')
 })
 
+await check('普通用户轮越线：用户第 1 步的提问不算插话，地图仍按 root-line', async () => {
+  const session = lineSession(400)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...LINE_CONFIG, notice: { ...DEFAULTS.notice, growthTokens: 0 } })
+  // 先跑完一轮，让增长状态存在（noteUserSpoke 只在状态已存在时看消息）。
+  const s2 = STEP(2, 1)
+  await ctx.handlers.get('agent/pre-step')(s2, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 2, signal: s2.signal }, () => {})
+  // 真实路径：第 1 步就带着用户自己的提问（不是叫醒轮，也不是插话），且此时越线。
+  session.used = 3600
+  session.seq += 1
+  const step = STEP(3, 1, {
+    messages: [{ role: 'user', content: [{ type: 'text', text: '帮我看看这个' }], source: { kind: 'user' } }],
+  })
+  await ctx.handlers.get('agent/pre-step')(step, () => {})
+  const text = String(onlyKind(session, NOTICE_KIND)[0].data.content[0].text)
+  assert.match(text, /这一轮是轮内到线提醒/, '普通用户轮的到线须知必须还是 root-line')
+  assert.doesNotMatch(text, /这一轮是轮末叫醒的压缩专用轮/, '不能因为用户提问就当成叫醒轮')
+})
+
 await check('子代理：轮内到线也在当步内联，不 followup', async () => {
   const session = lineSession(200)
   session.id = 'sub-1'
@@ -514,9 +596,221 @@ await check('根会话被增长叫醒的轮里跨到线：到线仍要内联提�
   // 下一轮是叫醒轮；占用跨到线，不能被 autoTurn 早退吞掉。
   session.used = 3600
   session.seq += 1
-  await ctx.handlers.get('agent/pre-step')(STEP(6, 1, { agent }), () => {})
+  await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
   assert.equal(onlyKind(session, NOTICE_KIND).length, noticesBefore + 1, '叫醒轮内跨到线仍要内联提醒')
   assert.equal(agent.followups.length, 1, '到线不额外 followup')
+  // 混合轮：这一轮是叫醒轮，补发的到线提醒也必须按“压缩专用轮”给，不能出现“继续当前任务”。
+  const mixed = String(onlyKind(session, NOTICE_KIND).at(-1).data.content[0].text)
+  assert.match(mixed, /〔这一轮是压缩专用轮：压完就结束本轮〕/, '叫醒轮里补发的提醒也要打标记')
+  assert.match(mixed, /轮末叫醒的压缩专用轮：压完就收手/, '混合轮的地图要印叫醒须知')
+  assert.doesNotMatch(mixed, /压完继续当前任务/, '混合轮不能出现“继续当前任务”')
+  assert.doesNotMatch(mixed, /不要因为这次提醒结束本轮/, '混合轮不能出现“不要结束本轮”')
+  assert.doesNotMatch(mixed, /这一轮是轮内到线提醒/, '混合轮不能印到线须知')
+})
+
+await check('轮末叫醒提醒：首行压缩专用轮标记、正文与地图都收手', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.followups.length, 1, '增长要叫醒')
+  const wakeText = String(agent.followups[0].content[0].text)
+  assert.match(wakeText, /〔这一轮是压缩专用轮：压完就结束本轮〕/, '叫醒提醒首行要有压缩专用轮标记')
+  assert.match(wakeText, /轮末叫醒的压缩专用轮：压完就收手/, '地图只印叫醒须知')
+  assert.match(wakeText, /压完就结束本轮，只回一两句/, '收尾段要明确结束本轮')
+  assert.match(wakeText, /如果这一轮用户又发来新消息，以用户的新消息为准/, '用户插话优先于收手')
+  assert.doesNotMatch(wakeText, /压完继续当前任务/, '叫醒轮不能出现“继续当前任务”')
+  assert.doesNotMatch(wakeText, /按原计划继续/, '叫醒轮不能让人按原计划继续')
+  assert.doesNotMatch(wakeText, /这一轮是轮内到线提醒/, '叫醒轮不能印到线须知')
+})
+
+await check('叫醒轮里 /context-status 与 context_map 都按 wake 给须知（接线级）', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  const registered = []
+  ctx.tools = { register: (tool) => (registered.push(tool), () => {}), get: () => ({}) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.followups.length, 1, '先被叫醒')
+  // 叫醒轮第 1 步：currentSteps = {turn:6}，autoTurn=6，两个只读入口都必须拿到 root-wake。
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
+  const cmd = ctx.commands[0]
+  const cmdText = cmd.handler({ agent }).text
+  assert.match(cmdText, /轮末叫醒的压缩专用轮：压完就收手/, '/context-status 要按 wake')
+  assert.doesNotMatch(cmdText, /这一轮是轮内到线提醒/, '/context-status 不能印到线须知')
+  const mapTool = registered.find((t) => t.name === 'context_map')
+  const mapOut = await mapTool.execute({}, { agent })
+  assert.match(mapOut.text, /轮末叫醒的压缩专用轮：压完就收手/, 'context_map 要按 wake')
+  assert.doesNotMatch(mapOut.text, /这一轮是轮内到线提醒/, 'context_map 不能印到线须知')
+})
+
+await check('叫醒轮里用户插话：执行位退回 plain（提醒里的优先级句兜底）', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
+  // 宿主认领 next-turn 后队列就空了；mock 不会自己清，手工模拟一下。
+  agent.inbox.nextTurn.length = 0
+  // 用户在叫醒轮第 2 步插话：宿主把插话排到下一步认领，noteUserSpoke 必须记下 spokeTurn。
+  // 同时把用量抬高，让这一轮真的攒下一条增长提醒——轮末也只允许退化追加，不能再叫醒一次。
+  session.used = 400
+  session.seq += 1
+  const s2 = STEP(6, 2, {
+    agent,
+    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '先回答我这个新问题' }] }],
+  })
+  await ctx.handlers.get('agent/pre-step')(s2, () => {})
+  const cmdText = ctx.commands[0].handler({ agent }).text
+  assert.match(cmdText, /压完继续当前任务/, '用户开口后按 plain 继续')
+  assert.doesNotMatch(cmdText, /轮末叫醒的压缩专用轮/, '用户开口后不能再印收手须知')
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 6, signal: s2.signal, agent }, () => {})
+  assert.equal(agent.followups.length, 1, '被叫醒的轮只叫醒一次：用户插话不能让轮末再叫醒一次')
+  // 下一轮（turn7）轮号不同：叫醒闸门自然打开，再长到门槛就该重新叫醒。
+  session.used = 500
+  session.seq += 1
+  const s7 = STEP(7, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(s7, () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 7, signal: s7.signal, agent }, () => {})
+  assert.equal(agent.followups.length, 2, '叫醒轮之后的下一轮仍能再叫醒')
+})
+
+await check('叫醒轮里宿主 runtime-context/compact-checkpoint 不算用户插话，真用户消息才算', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
+  agent.inbox.nextTurn.length = 0
+  // 宿主运行期上下文：不是用户说话，不能把叫醒轮降成 plain。
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(6, 2, {
+    agent,
+    messages: [
+      { source: { kind: 'runtime-context' }, content: [{ type: 'text', text: '宿主注入的上下文' }] },
+      { source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '宿主压缩检查点' }] },
+    ],
+  }), () => {})
+  assert.match(ctx.commands[0].handler({ agent }).text, /轮末叫醒的压缩专用轮/, 'runtime-context/compact-checkpoint 不降 plain')
+  // 真用户消息：降 plain。
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(6, 3, {
+    agent,
+    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '先回答我' }] }],
+  }), () => {})
+  assert.match(ctx.commands[0].handler({ agent }).text, /压完继续当前任务/, '真用户消息降 plain')
+})
+
+await check('叫醒提醒被取消/排队未认领：普通轮不按叫醒轮，认领后才按 wake', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.followups.length, 1, '先叫醒一次')
+  // 取消：宿主清空 inbox，下一轮没有我们的提醒可认领。
+  agent.inbox.nextTurn.length = 0
+  session.seq += 1
+  const s6 = STEP(6, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(s6, () => {})
+  let cmdText = ctx.commands[0].handler({ agent }).text
+  assert.match(cmdText, /压完继续当前任务/, '提醒被取消：本轮按普通轮继续')
+  assert.doesNotMatch(cmdText, /轮末叫醒的压缩专用轮/, '没认领到提醒就不能按叫醒轮渲染')
+  // 排队：提醒还在 next-turn，但本轮没轮到它（宿主每轮只认领一条）。
+  agent.inbox.nextTurn.push(agent.followups[0])
+  session.seq += 1
+  const s7 = STEP(7, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(s7, () => {})
+  cmdText = ctx.commands[0].handler({ agent }).text
+  assert.match(cmdText, /压完继续当前任务/, '提醒还在排队：本轮仍按普通轮')
+  assert.doesNotMatch(cmdText, /轮末叫醒的压缩专用轮/, '排队未认领也不能按叫醒轮渲染')
+  // 下一轮真正认领到提醒：这时才按叫醒轮。
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(claimWake(8, agent), () => {})
+  cmdText = ctx.commands[0].handler({ agent }).text
+  assert.match(cmdText, /轮末叫醒的压缩专用轮/, '认领到提醒后才是叫醒轮')
+})
+
+await check('叫醒轮收尾后 /context-status 按 plain（不拿上一轮状态冒充本轮）', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  session.seq += 1
+  const s6 = claimWake(6, agent)
+  await ctx.handlers.get('agent/pre-step')(s6, () => {})
+  // 收尾载荷带 agent 时清 currentSteps；此后命令不再把上一轮当"当前轮"。
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 6, signal: s6.signal, agent }, () => {})
+  const cmdText = ctx.commands[0].handler({ agent }).text
+  assert.match(cmdText, /压完继续当前任务/, '收尾后按 plain 继续')
+  assert.doesNotMatch(cmdText, /轮末叫醒的压缩专用轮/, '收尾后不能再印收手须知')
+})
+
+await check('场景判定：叫醒优先于到线、plain 兜底、子代理只分轮首/到线', async () => {
+  assert.equal(sceneOfFlags({ turn: 6, autoTurn: 6, lineInlineTurn: 6 }), 'root-wake', '叫醒与到线同轮按叫醒')
+  assert.equal(sceneOfFlags({ turn: 6, autoTurn: 6, spokeTurn: 6 }), 'plain', '用户本轮插过话：执行场景按 plain')
+  assert.equal(sceneOfFlags({ turn: 6, autoTurn: 6, spokeTurn: 5 }), 'root-wake', '别的轮插话不影响本轮叫醒')
+  assert.equal(sceneOfFlags({ turn: 6, autoTurn: 6, lineInlineTurn: 6, spokeTurn: 6 }), 'plain', '插话优先于叫醒+到线混合')
+  assert.equal(sceneOfFlags({ turn: 3, lineInlineTurn: 3 }), 'root-line', '普通到线轮不受影响')
+  assert.equal(sceneOfFlags({ turn: 7, autoTurn: 6, lineInlineTurn: 7 }), 'root-line')
+  assert.equal(sceneOfFlags({ turn: 8, autoTurn: 6, lineInlineTurn: 7 }), 'plain')
+  assert.equal(sceneOfFlags({ turn: null, autoTurn: null, lineInlineTurn: null }), 'plain', '没有轮号时不能把 null===null 判成到线')
+  assert.equal(sceneOfFlags({ subagent: true, turn: 3, lineInlineTurn: 3 }), 'sub-line')
+  assert.equal(sceneOfFlags({ subagent: true, turn: 4, lineInlineTurn: 3 }), 'sub-start')
+  assert.equal(sceneContinues('root-wake'), false, '叫醒轮收手')
+  for (const scene of ['root-line', 'sub-line', 'sub-start', 'plain']) {
+    assert.equal(sceneContinues(scene), true, `${scene} 要继续任务`)
+  }
 })
 
 await check('子代理：理由到 step2 才首次成立，也不能在 step2 内联', async () => {
@@ -1308,6 +1602,95 @@ await check('掉回线下要落盘灯灭：重启后再越线仍报一次（不�
   })
 })
 
+await check('重启后叫醒轮场景不退化：autoTurn/spokeTurn 从盘上回灌', async () => {
+  await withScratchHome(async () => {
+    const session = blockSession(5, 150)
+    session.id = 'session-restart-scene'
+    session.requestContext = () => ({ contextWindow: 4000 })
+    session.used = 200
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } }
+    const ctx1 = usageCtx(session)
+    apply(ctx1, config)
+    const t1 = STEP(1, 1)
+    await ctx1.handlers.get('agent/pre-step')(t1, () => {})
+    session.used = 300
+    session.seq += 1
+    const t2 = STEP(1, 2, { agent: t1.agent })
+    await ctx1.handlers.get('agent/pre-step')(t2, () => {})
+    await ctx1.handlers.get('agent/turn-stopping')({ turn: 1, signal: t2.signal }, () => {})
+    assert.equal(t1.agent.followups.length, 1, '先叫醒一次')
+    // 第 2 轮第 1 步认领提醒：autoTurn=2 落盘
+    session.seq += 1
+    await ctx1.handlers.get('agent/pre-step')(claimWake(2, t1.agent), () => {})
+    assert.match(ctx1.commands[0].handler({ agent: t1.agent }).text, /轮末叫醒的压缩专用轮/, '重启前是 wake')
+    assert.equal(readGrowth('session-restart-scene') && readGrowth('session-restart-scene').autoTurn, 2, 'autoTurn 要落盘')
+    // 模拟重启：第 2 轮第 2 步，内存状态全丢，只能靠盘
+    const ctx2 = usageCtx(session)
+    apply(ctx2, config)
+    session.seq += 1
+    await ctx2.handlers.get('agent/pre-step')(STEP(2, 2, { agent: t1.agent }), () => {})
+    assert.match(ctx2.commands[0].handler({ agent: t1.agent }).text, /轮末叫醒的压缩专用轮/, '重启后同一轮仍是 wake')
+    // 用户在这一轮插话：spokeTurn=2 落盘；再重启，执行场景仍是 plain
+    session.seq += 1
+    await ctx2.handlers.get('agent/pre-step')(STEP(2, 3, {
+      agent: t1.agent,
+      messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '先办这个' }] }],
+    }), () => {})
+    assert.match(ctx2.commands[0].handler({ agent: t1.agent }).text, /压完继续当前任务/, '插话后是 plain')
+    assert.equal(readGrowth('session-restart-scene') && readGrowth('session-restart-scene').spokeTurn, 2, 'spokeTurn 要落盘')
+    const ctx3 = usageCtx(session)
+    apply(ctx3, config)
+    session.seq += 1
+    await ctx3.handlers.get('agent/pre-step')(STEP(2, 4, { agent: t1.agent }), () => {})
+    assert.match(ctx3.commands[0].handler({ agent: t1.agent }).text, /压完继续当前任务/, '重启后用户已插话的轮仍是 plain')
+  })
+})
+
+await check('重启发生在认领前：下一轮认领提醒仍按 wake', async () => {
+  await withScratchHome(async () => {
+    const session = blockSession(5, 150)
+    session.id = 'session-restart-before-claim'
+    session.requestContext = () => ({ contextWindow: 4000 })
+    session.used = 200
+    const config = { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } }
+    const ctx1 = usageCtx(session)
+    apply(ctx1, config)
+    const t1 = STEP(1, 1)
+    await ctx1.handlers.get('agent/pre-step')(t1, () => {})
+    session.used = 300
+    session.seq += 1
+    const t2 = STEP(1, 2, { agent: t1.agent })
+    await ctx1.handlers.get('agent/pre-step')(t2, () => {})
+    await ctx1.handlers.get('agent/turn-stopping')({ turn: 1, signal: t2.signal }, () => {})
+    assert.equal(t1.agent.followups.length, 1, '先叫醒一次')
+    // 进程在认领前重启：新 ctx 没有内存状态，认领那一步必须先把状态建出来/回灌。
+    const ctx2 = usageCtx(session)
+    apply(ctx2, config)
+    session.seq += 1
+    await ctx2.handlers.get('agent/pre-step')(claimWake(2, t1.agent), () => {})
+    assert.match(ctx2.commands[0].handler({ agent: t1.agent }).text, /轮末叫醒的压缩专用轮/, '认领时仍按 wake')
+  })
+})
+
+await check('重启后到线轮场景不退化：lineInlineTurn 从盘上回灌', async () => {
+  await withScratchHome(async () => {
+    const session = lineSession(3600)
+    session.id = 'session-restart-line-scene'
+    session.requestContext = () => ({ contextWindow: 4000 })
+    const ctx1 = usageCtx(session)
+    apply(ctx1, LINE_CONFIG)
+    const t1 = STEP(1, 1)
+    await ctx1.handlers.get('agent/pre-step')(t1, () => {})
+    assert.match(ctx1.commands[0].handler({ agent: t1.agent }).text, /轮内到线提醒/, '重启前是 root-line')
+    assert.equal(readGrowth('session-restart-line-scene') && readGrowth('session-restart-line-scene').lineInlineTurn, 1, 'lineInlineTurn 要落盘')
+    const ctx2 = usageCtx(session)
+    apply(ctx2, LINE_CONFIG)
+    session.seq += 1
+    await ctx2.handlers.get('agent/pre-step')(STEP(1, 2, { agent: t1.agent }), () => {})
+    assert.match(ctx2.commands[0].handler({ agent: t1.agent }).text, /轮内到线提醒/, '重启后同一轮仍是 root-line')
+  })
+})
+
 await check('旁路先建了状态（那一步拿不到用量）：下一次仍从盘上回灌，不冲掉旧基线', async () => {
   await withScratchHome(async () => {
     // 盘上已有基线 100；第一步拿不到用量，状态会被轮次标记旁路先建出来
@@ -2046,12 +2429,12 @@ await check('回执单位：原文区数「条消息」、区块数「个块」�
   assert.match(lines[1], /l1 成功：B（3 个块 -> 省 90 token）/)
 })
 
-await check('成功回执：收手提醒在地图之后、是本组最后一行（改文案要红）', async () => {
+await check('成功回执：睡醒轮收手句在地图之后、是本组最后一行（改文案要红）', async () => {
   const lines = receiptLines(
     [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
     { mapText: '地图第一行\n地图第二行' },
   )
-  assert.equal(lines[lines.length - 1], '本轮压缩已经完成，请在本轮不要继续压缩。')
+  assert.equal(lines[lines.length - 1], '压缩完成，本轮到此结束；未决的事留到下一轮。')
   assert.equal(lines[lines.length - 2], '地图第一行\n地图第二行', '提醒要排在地图之后')
   assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
 })
@@ -2113,7 +2496,18 @@ await check('B3 对照：默认开着时仍然明确点名 session_event_read �
   assert.doesNotMatch(text, /必须同批一起给/, 'F3：级联规矩也只在说明里写一份')
 })
 
-await check('compress 的填表语法示例：合法 JSON、to 在层对象里、l3 不写 to', async () => {
+await check('系统提示的 to 半句：l0 是轮号、l1/l2 是块序号（改文案要红）', async () => {
+  const session = usageSession(120)
+  const ctx = usageCtx(session)
+  const captured = []
+  ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
+  apply(ctx, { ...DEFAULTS })
+  const text = captured.map((t) => (typeof t === 'function' ? t({ agent: { id: 'a1' } }) : t)).join('')
+  assert.match(text, /压缩时 to 的轮号照〔轮次标记〕认；l1\/l2 的 to 是块序号，不是轮号/, '问题 1 依赖这句提示')
+  assert.doesNotMatch(text, /压缩时写 to 就照它认轮号/, '旧句不能回来')
+})
+
+await check('compress 描述开头形状 + schema 顺序：to 在层对象里、l3 不写 to', async () => {
   const session = usageSession(120)
   const ctx = usageCtx(session)
   const registered = []
@@ -2122,27 +2516,22 @@ await check('compress 的填表语法示例：合法 JSON、to 在层对象里�
   const compress = registered.find((tool) => tool.name === 'compress')
   assert.ok(compress, 'compress 工具要注册')
   const desc = compress.description
-  assert.match(desc, /填表语法示例/, '要有 tool 参数示例')
-  assert.match(desc, /不是顶层字段/, '明确 to 不是顶层字段')
+  assert.match(desc, /^把旧对话折成更短的摘要。参数形状：/, '描述第一句就写形状')
+  assert.match(desc, /\{"l0":\{"to":"T…","title":"…","summary":"…"\}\}/, 'l0 的单层形状要带 to')
+  assert.match(desc, /\{"l3":\{…\},"l1":\{…\},"l0":\{…\}\}/, '多层形状要并排放在最外层')
+  assert.match(desc, /to 写在层对象里，最外层不放任何东西/, '明确 to 不是顶层字段')
+  assert.match(desc, /每个对象里是 to（l3 除外）、title、summary/, 'l3 不写 to 不能与“三个字段”自相矛盾')
+  assert.match(desc, /每一层的 to 只写一个锚点/, 'to 只写一个锚点的范围是每一层')
   assert.match(desc, /占位符/, '明确示例里的号是占位符')
+  assert.doesNotMatch(desc, /"to":"T?\d/, '形状示例里 to 不许出现具体号')
+  assert.doesNotMatch(desc, /填表语法示例/, '旧的示例段已并入形状句')
 
-  const snippets = desc.match(/\{"l\d":\{[^{}]*\}(?:,"l\d":\{[^{}]*\})*\}/g) || []
-  assert.equal(snippets.length, 2, '示例要两段：多键一段、只压 l3 一段')
-  const ORDER = ['l3', 'l2', 'l1', 'l0']
-  for (const snippet of snippets) {
-    const parsed = JSON.parse(snippet)
-    const keys = Object.keys(parsed)
-    assert.deepEqual(keys, ORDER.filter((key) => keys.includes(key)), '示例键序要按“最老的一层先写：l3 → l2 → l1 → l0”')
-    for (const [key, value] of Object.entries(parsed)) {
-      assert.equal(typeof value, 'object', `${key} 的值必须是对象`)
-      assert.ok(!Array.isArray(value), `${key} 的值不能是数组`)
-      assert.equal(typeof value.title, 'string', `${key} 要写 title`)
-      assert.equal(typeof value.summary, 'string', `${key} 要写 summary`)
-      assert.doesNotMatch(String(value.to ?? ''), /\d/, `${key} 的 to 不许出现具体号`)
-    }
-    if ('l3' in parsed) assert.equal(parsed.l3.to, undefined, 'l3 不写 to')
-    else for (const key of Object.keys(parsed)) assert.equal(typeof parsed[key].to, 'string', `${key} 必须写 to`)
+  // 参数顺序：to 必须是第一个属性（模型按 schema 顺序生成，to 放最后时漏写率最高）。
+  const schemaKeys = (key) => Object.keys(compress.parameters.properties[key].properties)
+  for (const key of ['l0', 'l1', 'l2']) {
+    assert.deepEqual(schemaKeys(key), ['to', 'title', 'summary'], `${key} 的 to 要排在属性第一位`)
   }
+  assert.deepEqual(schemaKeys('l3'), ['title', 'summary'], 'l3 不写 to')
 
   assert.match(desc, /l0 的 to 写 T 号，l1\/l2 写序号，l3 不写 to/, '占位符含义要说全')
   const toolText = desc + JSON.stringify(compress.parameters)
@@ -2248,7 +2637,7 @@ await check('E：同一轮跨过总长线时 compressKeep 触发重算', async (
 })
 
 // 压缩成功后 resetGrowthBaseline 必须清掉“哪层压得动”的旧判定；否则同轮降幅 <5% 时
-// zonesTurn 不作废，余下步骤会继续用压缩前的 compressible（qwen 联动复审 Minor 2）。
+// zonesTurn 不作废，余下步骤会继续用压缩前的 compressible（回归修复）。
 await check('resetGrowthBaseline 清掉 compressible/envBlocked/compressTurn/compressKeep/zonesTurn/zonesOver', async () => {
   const session = usageSession(900)
   const ctx = usageCtx(session)

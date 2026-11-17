@@ -42,11 +42,18 @@ const uniq = `session-tmp-${process.pid}-${Date.now()}`
 
 try {
   // ① 正常写入 / 读回
-  check('写下去返回 true', writeGrowth('session-abc', { tokens: 123456, growthQuota: 32500, lineOn: true }) === true)
+  check('写下去返回 true', writeGrowth('session-abc', {
+    tokens: 123456, growthQuota: 32500, lineOn: true, autoTurn: 7, spokeTurn: 7, lineInlineTurn: 7,
+  }) === true)
   const back = readGrowth('session-abc')
-  check('读回来字段一致', back && back.tokens === 123456 && back.growthQuota === 32500 && back.lineOn === true, JSON.stringify(back))
+  check('读回来字段一致', back && back.tokens === 123456 && back.growthQuota === 32500 && back.lineOn === true && back.autoTurn === 7 && back.spokeTurn === 7 && back.lineInlineTurn === 7, JSON.stringify(back))
   check('落盘文件在 DSH_HOME/logs/ebbing-context-state 下', existsSync(fileOf('session-abc')))
   check('写完不留下 .tmp', readdirSync(stateDir).every((f) => !f.endsWith('.tmp')))
+
+  // ①b 旧版本（0.2.15 及以前）没有场景字段：照样能读，两个轮号按 null 处理
+  writeFileSync(fileOf('session-old'), JSON.stringify({ v: 1, tokens: 10, growthQuota: null, lineOn: false }))
+  const old = readGrowth('session-old')
+  check('旧记录缺 autoTurn/spokeTurn 也能读，按 null', old && old.tokens === 10 && old.autoTurn === null && old.spokeTurn === null && old.lineInlineTurn === null, JSON.stringify(old))
 
   // ② 缺失 / 损坏 / 版本不对 / 字段非法 → null（不是抛错）
   check('没有文件时读成 null', readGrowth('session-missing') === null)

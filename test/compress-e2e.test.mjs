@@ -24,7 +24,7 @@
 //   5 未闭合事务预检
 //   6 并发第二个 compress 被拒
 
-import { apply } from '../index.js'
+import { apply, RECEIPT_CONTINUE_LINE, RECEIPT_STOP_LINE } from '../index.js'
 import { runCompress } from '../lib/compress.js'
 import { readZones, openCompaction } from '../lib/blocks.js'
 import { issue } from '../lib/license.js'
@@ -35,7 +35,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // 用例 29 会经真实 apply() 注册的 compress 工具写运行日志；把 DSH_HOME 指到临时目录，
-// 不让测试的假 compress-ok / compress-rejected 行混进真机日志（qwen 复审 Minor）。
+// 不让测试的假 compress-ok / compress-rejected 行混进真机日志（回归修复）。
 const testHome = mkdtempSync(join(tmpdir(), 'ec-e2e-home-'))
 const savedHome = process.env.DSH_HOME
 process.env.DSH_HOME = testHome
@@ -1202,6 +1202,11 @@ async function case29() {
   check('29a · 工具 wrapper 的 context_map 可用（发许可证）', typeof mapOut.text === 'string' && /可压位置/.test(mapOut.text), mapOut.text)
   const outAbove = await compressAbove.execute({ l0: { title: '工具 wrapper', summary: W(120, '压'), to: 'T1' } }, exec)
   check('29b · 达到总长线时 wrapper 按 keepTurns=0 放行 T1', !/没能压缩/.test(outAbove.text), outAbove.text.slice(0, 300))
+  // 接线级：plain（没有叫醒状态的用户轮自行压缩）必须落到 CONTINUE。
+  // 把 continueLine 改回旧的 `subagent || lineInlineTurn === turn`，这条会红（回归修复）。
+  check('29b2 · plain 成功回执末行是 CONTINUE（不是收手句）',
+    outAbove.text.trimEnd().endsWith(RECEIPT_CONTINUE_LINE) && !outAbove.text.includes(RECEIPT_STOP_LINE),
+    outAbove.text.slice(-160))
   check('29c · 压缩真的落盘（四条事件）', above.appends.length === 4 && above.appends.map((a) => a.type).join(',') === 'compaction/start,compaction/summary,user/message,compaction/end', show(above.appends.map((a) => a.type)))
 
   const below = rawTwoTurns(400)
@@ -1212,6 +1217,34 @@ async function case29() {
   const outBelow = await compressBelow.execute({ l0: { title: '工具 wrapper', summary: W(120, '压'), to: 'T1' } }, exec)
   check('29d · 未到总长线时 wrapper 仍传 keepTurns=2，T1 被拒', /没能压缩/.test(outBelow.text) && /keepTurns=2/.test(outBelow.text), outBelow.text.slice(0, 300))
 }
+async function case30() {
+  const logs = []
+  const logFn = (type, data) => logs.push({ type, data })
+  const config30 = { ...config, foldCallRecord: false }
+  // 真机形态：to 写到整个参数的顶层（单层）。插件应自动挪进 l0，压缩照常成功。
+  const session = rawTwoTurns(400)
+  const agent = agentFor('e2e-agent-30')
+  const ctx = fakeCtx(session)
+  issueLicense(ctx, session, agent, logFn)
+  const result = await runCompress(ctx, agent, { to: 'T1', l0: { title: '顶层 to', summary: W(120, '压') } }, config30, logFn)
+  check('30a · 顶层 to（单层）自动上提后压缩成功', !!(result && result.ok === true), show(result))
+  check('30b · 四条事件照常落盘', session.appends.length === 4, show(session.appends.map((a) => a.type)))
+  check('30c · 日志记下 compress-hoisted-to', logs.some((l) => l.type === 'compress-hoisted-to' && l.data && l.data.key === 'l0'), show(logs.map((l) => l.type)))
+
+  // 多层 + 顶层 to 无法判断属于谁：仍拒，且一个事件都不写。
+  const session2 = rawTwoTurns(400)
+  const ctx2 = fakeCtx(session2)
+  const agent2 = agentFor('e2e-agent-30b')
+  issueLicense(ctx2, session2, agent2, logFn)
+  const bad = await runCompress(ctx2, agent2, {
+    to: 'T1',
+    l0: { title: 'a', summary: W(80, '压') },
+    l1: { title: 'b', summary: W(80, '压'), to: '1' },
+  }, config30, logFn)
+  check('30d · 多层 + 顶层 to 仍被拒', !!(bad && bad.ok === false), show(bad))
+  check('30e · 被拒时一个事件都不写', session2.appends.length === 0, show(session2.appends.length))
+}
+await runCase('用例30 顶层 to 自动上提', case30)
 await runCase('用例29 compress 工具 wrapper 的运行时 keepTurns', case29)
 await runCase('用例27 l0 最后一轮的建议', case27)
 await runCase('用例28 keepTurns 运行时值进入 compress 区间校验', case28)
