@@ -2110,6 +2110,22 @@ await check('超窗口：第一次只给中性提示、不动自动续作；连�
   assert.match(String(all[1].data.content[0].text), /连着两轮都超出窗口/)
 })
 
+// 0.2.2-rc.4 新增 CONTENT_REFUSED（模型拒绝回答），它和超窗口是两种完全不同的失败。
+// 插件只对 CONTEXT_WINDOW_EXCEEDED 给提示/缴自动续作；别的 code 必须原样 next，不能误报超窗。
+await check('0.2.2-rc.4：CONTENT_REFUSED 原样 next，不触发超窗提示', async () => {
+  const session = usageSession(100)
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0 })
+  const handler = ctx.handlers.get('agent/request-error')
+  let nextCalls = 0
+  await handler(
+    { agent: { id: 'a1' }, turn: 5, failure: { code: 'CONTENT_REFUSED', message: 'DeepSeek refused' } },
+    () => { nextCalls += 1 },
+  )
+  assert.equal(nextCalls, 1, '非超窗错误要让宿主继续处理')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 0, '不许把 CONTENT_REFUSED 当超窗提示')
+})
+
 await check('超窗口：中间成功收尾过一轮，计数清零（重新从"可能自愈"开始）', async () => {
   const session = usageSession(100)
   const ctx = usageCtx(session)
