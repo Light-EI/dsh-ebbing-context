@@ -8,7 +8,7 @@
 ## 宿主适配
 
 - **rc.4**：DeepSeek 模型拒答以 `CONTENT_REFUSED` 上报时，插件不再把它误判成上下文超长；非超窗错误原样交给宿主。新增回归测试。
-- **rc.5**：只改 web search 默认/provider、设置页 web search、工具目录描述与 LiveShare 测试时钟；插件依赖的会话、压缩、工具、系统提示接缝未变，无需运行时代码改动。
+- **rc.5**：只改 web search 默认/provider、设置页 web search、工具目录描述及 web search 配套快照/测试；插件依赖的会话、压缩、工具、系统提示接缝未变，无需运行时代码改动。
 
 ## 文档
 
