@@ -2549,8 +2549,30 @@ await check('compress 描述开头形状 + schema 顺序：to 在层对象里、
   assert.match(summary, /原文很少或信息确实不足时可以短/, '原文很少时可以短这句要保留')
   assert.match(summary, /四行是结构，不是长度上限/, '四行不是长度上限这句要保留')
   assert.doesNotMatch(summary, /至少[^\n]{0,12}理由/, '不许回到“至少一条理由”')
+
+  // 2026-11-18 摘要质量改动（评审 + 用户拍板）：
+  // ① 摘要要承载重要结论、确认的事实、讨论结果与来龙去脉；
+  // ② 运行结论先给结果，过程性记录挪位但不删；归属类事实保留；
+  // ③ 时间边界：旧块不写压缩时的现状；
+  // ④ 合并旧摘要块时不能只并标题；
+  // ⑤ 领域通用：不写“改了什么文件/跑了什么命令/agent 名/审查轮次/提交号”这类模板；
+  // ⑥ 明确禁止“写完自查/重写”类措辞，避免模型以为要二次压缩。
+  assert.match(summary, /重要结论/, '要明确要求重要结论')
+  assert.match(summary, /确认的事实/, '要明确要求确认的事实')
+  assert.match(summary, /讨论后定下的方案/, '要明确要求讨论结果')
+  assert.match(summary, /被否决的方案/, '要明确要求被否决的方案及原因')
+  assert.match(summary, /还悬着什么/, '要留未决问题的位置')
+  assert.match(summary, /来龙去脉/, '要明确要求来龙去脉')
+  assert.match(summary, /路径、地址或其它能照它找回来的标识写全/, '附件/产出要能找回')
+  assert.match(summary, /谁给的/, '归属类事实不能被过程性规则一刀切删掉')
+  assert.match(summary, /压缩时才看到的现状不属于旧块的结论/, '时间边界要写进提示词')
+  assert.match(summary, /不能只并标题/, '合并旧块不能只抄标题')
+  assert.match(summary, /不能只写“已完成\/已通过”/, '要防止空泛结论')
+  assert.doesNotMatch(summary, /改了什么文件|跑了什么命令|agent 名|审查轮次|提交号/, '摘要规则不能绑定编程/代理流程模板')
+  assert.doesNotMatch(summary, /自查|逐项检查|写完.*检查|再写一版|重写一遍/, '不许让模型以为要写两遍/二次检查')
   assert.match(l0Summary, /同 l3 的 summary 规则：四行——/, '一行引用要指得回 l3')
   assert.match(l0Summary, /删过程流水但保留决策依据、失败原因与关键数据/, '一行引用口径要与 l3 一致')
+  assert.match(l0Summary, /运行结论（结果、重要结论与定案依据；附件写全路径或地址）/, '一行引用要同步新的运行结论口径')
 })
 
 // 2026-11-12 用户 E 待办：占用达到总长线（triggerPct）时，pre-step 的"压得动"判据也必须

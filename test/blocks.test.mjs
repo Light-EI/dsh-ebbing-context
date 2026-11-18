@@ -728,9 +728,30 @@ check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现�
     nodes: [3],
   }
   const empty = resolveTurnAnchor(emptyTurnZones, 'T2')
-  check('空轮：说「表层上已经没有原文了（空轮）」并指出最后能压的位置',
-    empty.ok === false && /（空轮）/.test(empty.reason) && /T1/.test(empty.reason), empty.reason)
+  check('空轮：说「表层上已经没有原文了（空轮）」并给出能写的 to',
+    empty.ok === false && /（空轮）/.test(empty.reason) && /能写的 to 只有 T1/.test(empty.reason)
+      && !/最后一个可压的位置/.test(empty.reason), empty.reason)
   check('空轮不说“缺轮”那套话', !/缺轮/.test(empty.reason), empty.reason)
+
+  // 关键回归：T3 是空轮，但 T4 还有原文时，不能只说“最后能压 T1”——
+  // 那会让模型以为 T4 写不得。只给最早/最远两端事实，不写 T1–T4 这种连续区间
+  //（SPEC §6：区间会被模型整串抄进 to，而且区间里夹着空轮会自相矛盾）。
+  const emptyWithLaterZones = {
+    currentTurn: 5,
+    zones: { l0: [{ seq: 1, turn: 1 }, { seq: 2, turn: 2 }, { seq: 3, turn: 4 }], l1: [], l2: [], l3: [] },
+    turnStarts: [{ turn: 1, seq: 1 }, { turn: 2, seq: 3 }, { turn: 3, seq: 5 }, { turn: 4, seq: 7 }],
+    turnStartIndex: new Map([[1, 0], [2, 2], [3, 4], [4, 6]]),
+    turnNotes: [],
+    nodes: [5],
+  }
+  const later = resolveTurnAnchor(emptyWithLaterZones, 'T3')
+  check('空轮：给最早/最远两端事实，不写连续区间',
+    later.ok === false && /（空轮）/.test(later.reason)
+      && /能写的 to 最早是 T1，最远是 T4/.test(later.reason)
+      && !/T1[–-]T4/.test(later.reason) && !/最后一个可压的位置/.test(later.reason),
+    later.reason)
+  check('空轮：点明被拒的 T3 本身不能当 to', /T3 本身以及其它写不得的轮号都不能当 to/.test(later.reason), later.reason)
+  check('空轮文案不混入“缺轮”那套话', !/缺轮/.test(later.reason), later.reason)
 }
 
 
