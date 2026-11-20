@@ -113,8 +113,8 @@ check('压缩须知：默认（无场景）只印继续那条，不并列互斥�
   /压完继续当前任务，不要结束本轮/.test(text) && !/轮末叫醒的压缩专用轮/.test(text) && !/75% 到线是轮内提醒/.test(text),
   text.split('\n').filter((l) => /压缩须知|压完/.test(l)).join(' ⏎ '))
 const sceneText = (scene, sub = false) => renderMap(ctx, agent, config, usage, sub, null, scene).text
-check('root-wake 须知：只印叫醒那条（收手），不出现“继续当前任务”',
-  /轮末叫醒的压缩专用轮/.test(sceneText('root-wake')) && !/压完继续当前任务/.test(sceneText('root-wake')) && !/75% 到线是轮内提醒/.test(sceneText('root-wake')))
+check('root-wake 须知：只印叫醒那条（只压一次、收手），不出现“继续当前任务”',
+  /轮末叫醒的压缩专用轮/.test(sceneText('root-wake')) && /本轮只压一次/.test(sceneText('root-wake')) && !/压完继续当前任务/.test(sceneText('root-wake')) && !/75% 到线是轮内提醒/.test(sceneText('root-wake')))
 check('root-line 须知：只印到线那条（继续任务）',
   /轮内到线提醒：压完继续当前任务/.test(sceneText('root-line')) && !/轮末叫醒的压缩专用轮/.test(sceneText('root-line')))
 check('子代理两种场景的须知同一条（轮首/到线行为一致）',

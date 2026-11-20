@@ -602,7 +602,7 @@ await check('根会话被增长叫醒的轮里跨到线：到线仍要内联提�
   // 混合轮：这一轮是叫醒轮，补发的到线提醒也必须按“压缩专用轮”给，不能出现“继续当前任务”。
   const mixed = String(onlyKind(session, NOTICE_KIND).at(-1).data.content[0].text)
   assert.match(mixed, /〔这一轮是压缩专用轮：压完就结束本轮〕/, '叫醒轮里补发的提醒也要打标记')
-  assert.match(mixed, /轮末叫醒的压缩专用轮：压完就收手/, '混合轮的地图要印叫醒须知')
+  assert.match(mixed, /轮末叫醒的压缩专用轮：本轮只压一次，压完就收手/, '混合轮的地图要印叫醒须知')
   assert.doesNotMatch(mixed, /压完继续当前任务/, '混合轮不能出现“继续当前任务”')
   assert.doesNotMatch(mixed, /不要因为这次提醒结束本轮/, '混合轮不能出现“不要结束本轮”')
   assert.doesNotMatch(mixed, /这一轮是轮内到线提醒/, '混合轮不能印到线须知')
@@ -624,7 +624,7 @@ await check('轮末叫醒提醒：首行压缩专用轮标记、正文与地图�
   assert.equal(agent.followups.length, 1, '增长要叫醒')
   const wakeText = String(agent.followups[0].content[0].text)
   assert.match(wakeText, /〔这一轮是压缩专用轮：压完就结束本轮〕/, '叫醒提醒首行要有压缩专用轮标记')
-  assert.match(wakeText, /轮末叫醒的压缩专用轮：压完就收手/, '地图只印叫醒须知')
+  assert.match(wakeText, /轮末叫醒的压缩专用轮：本轮只压一次，压完就收手/, '地图只印叫醒须知')
   assert.match(wakeText, /压完就结束本轮，只回一两句/, '收尾段要明确结束本轮')
   assert.match(wakeText, /如果这一轮用户又发来新消息，以用户的新消息为准/, '用户插话优先于收手')
   assert.doesNotMatch(wakeText, /压完继续当前任务/, '叫醒轮不能出现“继续当前任务”')
@@ -653,11 +653,11 @@ await check('叫醒轮里 /context-status 与 context_map 都按 wake 给须知�
   await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
   const cmd = ctx.commands[0]
   const cmdText = cmd.handler({ agent }).text
-  assert.match(cmdText, /轮末叫醒的压缩专用轮：压完就收手/, '/context-status 要按 wake')
+  assert.match(cmdText, /轮末叫醒的压缩专用轮：本轮只压一次，压完就收手/, '/context-status 要按 wake')
   assert.doesNotMatch(cmdText, /这一轮是轮内到线提醒/, '/context-status 不能印到线须知')
   const mapTool = registered.find((t) => t.name === 'context_map')
   const mapOut = await mapTool.execute({}, { agent })
-  assert.match(mapOut.text, /轮末叫醒的压缩专用轮：压完就收手/, 'context_map 要按 wake')
+  assert.match(mapOut.text, /轮末叫醒的压缩专用轮：本轮只压一次，压完就收手/, 'context_map 要按 wake')
   assert.doesNotMatch(mapOut.text, /这一轮是轮内到线提醒/, 'context_map 不能印到线须知')
 })
 
@@ -918,6 +918,7 @@ await check('子代理成功压缩：回执必须继续任务，不能收手', a
   }, { agent, callId: 'sub-receipt-call' })
   assert.match(String(res.text), /压缩完成；继续当前任务/, '子代理成功回执必须要求继续任务')
   assert.match(String(res.text), /最后给结论/)
+  assert.match(String(res.text), /本轮不要再压第二次/, '子代理每轮也只压一次；这句不能从共享回执里丢')
 })
 
 await check('闸门只拦子代理：根会话 step>1 压缩放行', async () => {
@@ -2445,12 +2446,13 @@ await check('回执单位：原文区数「条消息」、区块数「个块」�
   assert.match(lines[1], /l1 成功：B（3 个块 -> 省 90 token）/)
 })
 
-await check('成功回执：睡醒轮收手句在地图之后、是本组最后一行（改文案要红）', async () => {
+await check('成功回执：睡醒轮收手句在地图之后、是本组最后一行，且明确只压一次（改文案要红）', async () => {
   const lines = receiptLines(
     [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
     { mapText: '地图第一行\n地图第二行' },
   )
-  assert.equal(lines[lines.length - 1], '压缩完成，本轮到此结束；未决的事留到下一轮。')
+  assert.equal(lines[lines.length - 1], '压缩完成，本轮到此结束；本轮不要再压第二次；未决的事留到下一轮。')
+  assert.match(lines[lines.length - 1], /本轮不要再压第二次/)
   assert.equal(lines[lines.length - 2], '地图第一行\n地图第二行', '提醒要排在地图之后')
   assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
 })
