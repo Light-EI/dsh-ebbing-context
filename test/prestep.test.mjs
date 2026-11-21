@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, sceneContinues, sceneOfFlags, RECEIPT_CONTINUE_LINE } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, sceneContinues, sceneOfFlags, RECEIPT_CONTINUE_LINE, RECEIPT_STOP_LINE, RECEIPT_WAKE_TOP_LINE } from '../index.js'
 import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
 import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
@@ -112,6 +112,9 @@ await check('apply() 能挂上：两个工具 + 一条命令', async () => {
   ctx.tools = { register: (tool) => (registered.push(tool), () => {}) }
   apply(ctx, {})
   assert.deepEqual(registered.map((t) => t.name).sort(), ['compress', 'context_map'])
+  const mapDesc = registered.find((t) => t.name === 'context_map').description
+  assert.match(mapDesc, /所有 compress 成功回执都只有一行占用/, 'context_map 描述要跟所有成功回执新行为')
+  assert.doesNotMatch(mapDesc, /除轮末叫醒压缩轮以外的成功回执/, '旧描述不能残留')
   assert.equal(ctx.commands.length, 1)
   assert.equal(ctx.commands[0].name, 'context-status')
   assert.equal(typeof ctx.handlers.get('agent/pre-step'), 'function')
@@ -632,6 +635,37 @@ await check('轮末叫醒提醒：首行压缩专用轮标记、正文与地图�
   assert.doesNotMatch(wakeText, /这一轮是轮内到线提醒/, '叫醒轮不能印到线须知')
 })
 
+await check('root-wake 成功压缩：首行先结束、尾行再收手，且不带完整地图/可压位置', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  const registered = []
+  ctx.tools = { register: (t) => (registered.push(t), () => {}), get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.followups.length, 1, '先被叫醒')
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
+  const mapTool = registered.find((t) => t.name === 'context_map')
+  await mapTool.execute({}, { agent, callId: 'wake-receipt-map' })
+  const tool = registered.find((t) => t.name === 'compress')
+  const res = await tool.execute({ l1: { title: 'A', summary: '并块', to: '2' } }, { agent, callId: 'wake-receipt-call' })
+  const text = String(res.text)
+  const lines = text.split('\n')
+  assert.equal(lines[0], RECEIPT_WAKE_TOP_LINE, '首行必须是结束句')
+  assert.match(text, /l1 成功：A/)
+  assert.match(text, /上下文 /, '要给一行占用概况')
+  assert.equal(lines[lines.length - 1], RECEIPT_STOP_LINE, '尾行必须是收手句')
+  assert.doesNotMatch(text, /可压位置|压缩须知|块（序号/, 'root-wake 成功回执不能带完整地图')
+})
+
 await check('叫醒轮里 /context-status 与 context_map 都按 wake 给须知（接线级）', async () => {
   const session = blockSession(5, 150)
   session.requestContext = () => ({ contextWindow: 4000 })
@@ -701,7 +735,7 @@ await check('叫醒轮里用户插话：执行位退回 plain（提醒里的优�
   assert.equal(agent.followups.length, 2, '叫醒轮之后的下一轮仍能再叫醒')
 })
 
-await check('叫醒轮里宿主 runtime-context/compact-checkpoint 不算用户插话，真用户消息才算', async () => {
+await check('叫醒轮里宿主注入/子代理返回/工具返回不算用户插话，只有用户 kind 才算', async () => {
   const session = blockSession(5, 150)
   session.requestContext = () => ({ contextWindow: 4000 })
   session.used = 200
@@ -717,21 +751,28 @@ await check('叫醒轮里宿主 runtime-context/compact-checkpoint 不算用户�
   session.seq += 1
   await ctx.handlers.get('agent/pre-step')(claimWake(6, agent), () => {})
   agent.inbox.nextTurn.length = 0
-  // 宿主运行期上下文：不是用户说话，不能把叫醒轮降成 plain。
+  // 反向白名单：只有 user / user-question-reply / schedule 算用户开口；
+  // 宿主注入、子代理返回、工具/助手来源、以及未来未知 kind 都不降 plain。
   session.seq += 1
   await ctx.handlers.get('agent/pre-step')(STEP(6, 2, {
     agent,
     messages: [
       { source: { kind: 'runtime-context' }, content: [{ type: 'text', text: '宿主注入的上下文' }] },
       { source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: '宿主压缩检查点' }] },
+      { source: { kind: 'skill-catalog' }, content: [{ type: 'text', text: '技能目录更新' }] },
+      { source: { kind: 'subagent-settled' }, content: [{ type: 'text', text: '子代理完成' }] },
+      { source: { kind: 'time-context' }, content: [{ type: 'text', text: '时间采样' }] },
+      { source: { kind: 'tool' }, content: [{ type: 'text', text: '工具结果' }] },
+      { source: { kind: 'model' }, content: [{ type: 'text', text: '模型切换' }] },
+      { source: { kind: 'future-host-injection' }, content: [{ type: 'text', text: '未来宿主的未知注入' }] },
     ],
   }), () => {})
-  assert.match(ctx.commands[0].handler({ agent }).text, /轮末叫醒的压缩专用轮/, 'runtime-context/compact-checkpoint 不降 plain')
-  // 真用户消息：降 plain。
+  assert.match(ctx.commands[0].handler({ agent }).text, /轮末叫醒的压缩专用轮/, '宿主注入/子代理返回/未知 kind 都不降 plain')
+  // 真用户消息（user-question-reply 是用户回答，算开口）：降 plain。
   session.seq += 1
   await ctx.handlers.get('agent/pre-step')(STEP(6, 3, {
     agent,
-    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '先回答我' }] }],
+    messages: [{ source: { kind: 'user-question-reply' }, content: [{ type: 'text', text: '先回答我' }] }],
   }), () => {})
   assert.match(ctx.commands[0].handler({ agent }).text, /压完继续当前任务/, '真用户消息降 plain')
 })
@@ -895,6 +936,8 @@ await check('到线内联触发成功压缩：回执要求继续任务（不是�
   }, { agent, callId: 'receipt-continue-call' })
   assert.match(String(res.text), /压缩完成；继续当前任务/, '到线内联的成功回执必须要求继续任务')
   assert.match(String(res.text), /本轮不要再压第二次/)
+  assert.match(String(res.text), /上下文 /, '到线成功回执只给一行占用')
+  assert.doesNotMatch(String(res.text), /可压位置|压缩须知|块（序号/, '到线成功回执不能带完整地图')
 })
 
 await check('子代理成功压缩：回执必须继续任务，不能收手', async () => {
@@ -919,6 +962,8 @@ await check('子代理成功压缩：回执必须继续任务，不能收手', a
   assert.match(String(res.text), /压缩完成；继续当前任务/, '子代理成功回执必须要求继续任务')
   assert.match(String(res.text), /最后给结论/)
   assert.match(String(res.text), /本轮不要再压第二次/, '子代理每轮也只压一次；这句不能从共享回执里丢')
+  assert.match(String(res.text), /上下文 /, '子代理成功回执只给一行占用')
+  assert.doesNotMatch(String(res.text), /可压位置|压缩须知|块（序号/, '子代理成功回执不能带完整地图')
 })
 
 await check('闸门只拦子代理：根会话 step>1 压缩放行', async () => {
@@ -2446,25 +2491,38 @@ await check('回执单位：原文区数「条消息」、区块数「个块」�
   assert.match(lines[1], /l1 成功：B（3 个块 -> 省 90 token）/)
 })
 
-await check('成功回执：睡醒轮收手句在地图之后、是本组最后一行，且明确只压一次（改文案要红）', async () => {
+await check('成功回执：睡醒轮首行先结束、尾行再收手；所有场景都只给一行占用、不给完整地图', async () => {
+  const summary = '上下文 192,000 token（宿主口径）/ 自估 150,000（24.4%）'
   const lines = receiptLines(
     [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
-    { mapText: '地图第一行\n地图第二行' },
+    { stopFirst: true, summaryText: summary, continueLine: false },
   )
-  assert.equal(lines[lines.length - 1], '压缩完成，本轮到此结束；本轮不要再压第二次；未决的事留到下一轮。')
-  assert.match(lines[lines.length - 1], /本轮不要再压第二次/)
-  assert.equal(lines[lines.length - 2], '地图第一行\n地图第二行', '提醒要排在地图之后')
-  assert.match(lines[0], /l0 成功：A（7 条消息 -> 省 120 token）/)
+  assert.equal(lines[0], RECEIPT_WAKE_TOP_LINE)
+  assert.match(lines[0], /请结束本压缩专用轮/)
+  assert.equal(lines[lines.length - 1], RECEIPT_STOP_LINE)
+  assert.match(lines[lines.length - 1], /不要再压第二次/)
+  assert.equal(lines[lines.length - 2], summary)
+  assert.match(lines[1], /l0 成功：A（7 条消息 -> 省 120 token）/)
+  assert.ok(!lines.some((line) => line.includes('地图第一行')), 'root-wake 成功回执不能带完整地图')
+  // 普通场景同样只给「结果 → 一行占用 → 继续/收手」，不因为 continueLine 就把地图塞回来。
+  const normal = receiptLines(
+    [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
+    { summaryText: summary, continueLine: true },
+  )
+  assert.equal(normal[normal.length - 2], summary, '普通成功回执也只给占用概况')
+  assert.equal(normal[normal.length - 1], RECEIPT_CONTINUE_LINE)
+  assert.ok(!normal.some((line) => line.includes('地图第一行')), '普通成功回执也不能带完整地图')
 })
 
-await check('到线/子代理回执：压完继续任务，不要求收手', async () => {
+await check('到线/子代理回执：压完继续任务，只给一行占用、不要求收手', async () => {
   const lines = receiptLines(
     [{ key: 'l0', title: 'A', shadowedCount: 7, savedTokens: 120 }],
-    { mapText: '地图', continueLine: true },
+    { summaryText: '上下文 192,000 token（宿主口径）/ 自估 150,000（24.4%）', continueLine: true },
   )
   assert.equal(lines[lines.length - 1], RECEIPT_CONTINUE_LINE)
   assert.match(RECEIPT_CONTINUE_LINE, /继续当前任务/)
   assert.doesNotMatch(RECEIPT_CONTINUE_LINE, /本轮压缩已经完成，请在本轮不要继续压缩/)
+  assert.ok(!lines.some((line) => line.includes('可压位置') || line.includes('压缩须知')))
 })
 
 await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按事件号能查回来」', async () => {

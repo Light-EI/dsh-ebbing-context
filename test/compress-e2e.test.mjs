@@ -628,8 +628,10 @@ async function case10() {
     // 故意不 issueLicense
     const args = { l0: { title: '第一阶段的结论', summary: W(120, '压'), to: 'T1' } }
     const result = await runCompress(ctx, agent, args, config, logger.fn)
-    check('10a · 没看地图就压 → 拒绝并说清"还没看过地图"',
-      !!(result && result.ok === false) && /还没看过地图/.test(result.reason) && session.appends.length === 0,
+    check('10a · 没看地图就压 → 拒绝并说清"还没看过地图"，不再提“上一次工具结果”',
+      !!(result && result.ok === false) && /还没看过地图/.test(result.reason) &&
+        /提醒或拒绝回执里附的地图/.test(result.reason) && !/上一次工具结果/.test(result.reason) &&
+        session.appends.length === 0,
       show({ ok: result && result.ok, reason: result && result.reason, appends: session.appends.length }))
   }
 

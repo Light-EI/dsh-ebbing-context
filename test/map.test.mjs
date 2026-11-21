@@ -100,6 +100,9 @@ check('超线时那一行标「⚠已超设计容量」，没超的默认地图�
   overText.split('\n').filter((l) => /^L[123]\s/.test(l)).join(' ⏎ '))
 check('地图带可压位置段', /可压位置/.test(text))
 check('地图带压缩须知段', /压缩须知/.test(text))
+const compact = renderMap(ctx, agent, config, usage, false, null, 'root-wake', true).text
+check('紧凑地图只给一行占用，不带可压位置/块表（所有成功回执用）',
+  /^上下文 /.test(compact) && !compact.includes('\n') && !/可压位置|区域|压缩须知/.test(compact), compact)
 const subText = renderMap(ctx, agent, config, usage, true).text
 check('子代理地图：须知只印子代理那条（压完继续任务、给结论），不说压缩专用轮',
   !/压缩专用轮/.test(subText) && /子代理的压缩只为腾地方/.test(subText) && /压完继续完成任务，最后一条给结论/.test(subText), subText.split('\n').filter((l) => /压缩须知|子代理/.test(l)).join(' ⏎ '))

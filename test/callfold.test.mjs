@@ -47,8 +47,9 @@ const textMessage = (text) => ({ role: 'assistant', content: [{ type: 'text', te
 check('成对时：折成一条用户消息，来源列表覆盖两个节点', () => {
   const session = fakeSession([10, 11], [callMessage([['compress', 'c1']]), resultMessage('c1')])
   const queue = new Map()
-  rememberFold(queue, 'c1', ['l0 成功：标题（12 条 -> 省 800 token）'])
+  rememberFold(queue, 'c1', ['本轮压缩已结束，请结束本压缩专用轮。', 'l0 成功：标题（12 条 -> 省 800 token）'], null, true)
   const note = foldCallRecord(session, queue, { foldCallRecord: true })
+  assert.equal(note.split('\n')[2], '本轮压缩已结束，请结束本压缩专用轮。', 'leadFirst 首行要排在说明之前')
   assert.equal(session.appends.length, 1)
   const one = session.appends[0]
   assert.equal(one.type, 'user/message')
@@ -121,6 +122,15 @@ check('短注正文：带抬头、带每条结果、不提任何工具名', () =
   assert.equal(note.includes('context_map'), false)
   assert.equal(note.toLowerCase().includes('compress'), false)
   assert.equal(note.includes('已经在你的上下文里'), true)
+})
+
+check('短注正文：leadFirst 把首行结束句放在「你刚刚…」之前', () => {
+  const top = '本轮压缩已结束，请结束本压缩专用轮；不要再压第二次。'
+  const note = buildNote([top, 'l0 成功：甲（3 条 -> 省 400 token）', '本轮不要再压第二次；未决的事留到下一轮。'], true)
+  const lines = note.split('\n')
+  assert.equal(lines[2], top, '抬头 + 哨兵之后就是结束句')
+  assert.ok(note.indexOf(top) < note.indexOf('你刚刚做过一次分层压缩'), '结束句必须排在说明之前')
+  assert.ok(note.includes('- l0 成功：甲'), '结果行仍列表化')
 })
 
 check('待折叠队列有上限：不会随会话无限长', () => {

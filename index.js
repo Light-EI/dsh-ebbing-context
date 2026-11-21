@@ -111,14 +111,12 @@ const MARKER_KIND = 'ebbing-context-marker'
 // 折叠短注也是一种"我们自己写的 user/message"。不登记它的话，pre-step 会把它当成
 // 用户真的开口了（foreign 判定），于是下一轮叫醒规则整段失效。
 const OUR_KINDS = new Set([NOTICE_KIND, MARKER_KIND, FOLD_KIND])
-// 宿主自己的非用户消息（不表示"用户开口"）：运行期上下文、模型切换提示、系统提示、
-// 工具注册、PTC 模式、宿主的 compact-checkpoint 检查点；tool/model 是工具/助手来源，
-// 也一并列上，免得将来它们出现在 next-step 时被误判。用户消息（user/user-question-reply/
-// schedule，或没有 source）不在这个集合里——仍按"用户开口"处理（宁可误降，不漏真用户）。
-const HOST_KINDS = new Set([
-  'runtime-context', 'model-selection', 'system-prompt', 'tool-registry', 'ptc-mode',
-  'compact-checkpoint', 'tool', 'model',
-])
+// 反向白名单（2026-11-21 用户裁定）：只认这三种 kind 是用户真的开口。
+// 以前是枚举宿主非用户 kind，漏一个（skill-catalog / subagent-settled / time-context…）
+// 就会把宿主注入误当用户插话，叫醒轮被降成 plain、回执反过来说“继续任务”。
+// 宿主的注入类型会继续长，枚举补不完；未知 kind 现在一律不算用户。
+// 没有 source 的消息仍按用户处理：老宿主/测试桩可能没有 source，不能把真用户漏掉。
+const USER_KINDS = new Set(['user', 'user-question-reply', 'schedule'])
 // 插件自己写的每条消息都带这行哨兵（设计约束）：kind 是借来的展示身份，哨兵才是真身份。
 // 宿主的 cordis-host-runner 消息不会带它，所以我们不会把它误认成自己的旧提醒，
 // 也不会把它的文字当成"用户开口了"。
@@ -136,14 +134,21 @@ export function describeResults(results) {
 // 成功回执的收手句：轮末叫醒的压缩专用轮到此结束，并且本轮只压一次。
 // 2026-11-16 真机里模型把「不要继续压缩」读成「可以继续原来的活」，压完连做 9 个工具调用；
 // 2026-11-20 又出现压完一次后刷新地图、把新出现的 L1 块当成第二次机会，所以这里把「只压一次」写死。
+// 2026-11-21 真机日志进一步证明：模型看得到 STOP，但会被刷新地图的「可压位置」诱导。
+// 因此 root-wake 成功回执改成「首行结束句 + 结果 + 一行占用 + 尾行结束句」，不再给完整地图。
 // 到线内联 / 子代理 / plain（用户轮自行压缩）用 RECEIPT_CONTINUE_LINE。
-export const RECEIPT_STOP_LINE = '压缩完成，本轮到此结束；本轮不要再压第二次；未决的事留到下一轮。'
+export const RECEIPT_WAKE_TOP_LINE = '本轮压缩已结束，请结束本压缩专用轮；不要再压第二次。'
+export const RECEIPT_STOP_LINE = '本轮不要再压第二次；未决的事留到下一轮。'
 export const RECEIPT_CONTINUE_LINE = '压缩完成；继续当前任务，最后给结论；本轮不要再压第二次，也不要只交压缩回执。'
 
-// 成功回执的正文行：结果行 → 可选说明（剪短、缺轮）→ 刷新后的地图 → 收手提醒。
-// 抽成导出函数是为了能被测试直接钉住（缺口台账：改文案 = 改逻辑，每处文案都要有正向断言）。
+// 成功回执的正文行：结果行 → 可选说明（剪短、缺轮）→ 一行占用 → 场景收尾。
+// 所有成功回执都不再带完整地图：本轮已经压完，地图里的「可压位置」只会被当成
+// 下一次压缩的菜单。完整地图只留给提醒与拒绝回执（选择位置/纠错时真的需要）。
+// root-wake 额外用 stopFirst 把结束句放到首行；其它场景只保留 CONTINUE 收尾。
 export function receiptLines(results, extras = {}) {
-  const lines = describeResults(results)
+  const lines = []
+  if (extras.stopFirst === true) lines.push(RECEIPT_WAKE_TOP_LINE)
+  lines.push(...describeResults(results))
   if (extras.prunedChars > 0) {
     lines.push(`顺带把超大的工具结果剪短了 ${extras.prunedChars} 个字符（原文仍在日志里，可查回）。`)
   }
@@ -151,9 +156,8 @@ export function receiptLines(results, extras = {}) {
   if (swallowed.length) {
     lines.push(`这次切点跨过了轮次记录里缺失的 ${swallowed.map((t) => `T${t}`).join('、')}——它们的内容已经一起压进块里，块头标签只写到 to 那一轮。`)
   }
-  if (extras.mapText) lines.push(extras.mapText)
-  // 收手提醒放在地图之后：否则"可写 to 的轮号/序号"紧跟在"不要继续压缩"后面，两句话会打架。
-  // 子代理/到线内联触发的压缩不是压缩专用轮：压完要继续任务，不能把回执当结论。
+  if (extras.summaryText) lines.push(extras.summaryText)
+  // 子代理/到线内联/plain 触发的压缩不是压缩专用轮：压完要继续任务，不能把回执当结论。
   lines.push(extras.continueLine === true ? RECEIPT_CONTINUE_LINE : RECEIPT_STOP_LINE)
   return lines
 }
@@ -1301,7 +1305,13 @@ function noteUserSpoke(state, payload) {
   // 但普通用户轮第 1 步认领到的就是用户自己的提问，不是"插话"：只有这一轮本来就是
   // 叫醒轮（autoTurn === turn）时才记 spokeTurn，否则到线轮的地图会被误降成 plain（回归修复）。
   const wakeTurn = turn !== null && st.autoTurn === turn
-  const foreign = payload.messages.some((m) => !(m && m.source && (OUR_KINDS.has(m.source.kind) || HOST_KINDS.has(m.source.kind))))
+  const foreign = payload.messages.some((m) => {
+    if (!m) return false
+    // 没有 source 的老消息按用户处理；有 source 的只认 USER_KINDS。
+    // 插件自己的提醒/标记/折叠注不在这三种里，因此不会被误认。
+    if (!m.source) return true
+    return USER_KINDS.has(m.source.kind)
+  })
   if (wakeTurn && foreign && st.spokeTurn !== turn) {
     st.spokeTurn = turn
     changed = true
@@ -1514,6 +1524,7 @@ function noticeText(ctx, config, record, count, log) {
       // 用户可能在叫醒轮进行中插话（宿主把插话排到下一步认领）。提醒已经进了上下文、
       // 无法撤回，所以这里预先给出优先级：用户新消息 > 收手。压缩照常，回执会按 plain 继续。
       '如果这一轮用户又发来新消息，以用户的新消息为准，先办用户的事。' +
+      '插件写的折叠注、轮次标记不算用户新消息，不要按"用户插话"处理。' +
       '压完就结束本轮，只回一两句：压了哪几层、省下多少、现在占用多少；不要复述摘要，也不要重新讲一遍做过的事。'
     : lineNotice
       ? '压不压由你判断：要压掉的那几轮里如果有还没做完的事（目标还没收尾、todo 没打完、还在验证、等用户拍板），' +
@@ -1601,7 +1612,8 @@ function contextMapTool(ctx, config, reminded) {
     name: 'context_map',
     description:
       '查看当前上下文的分层结构：每一层占了多少、每个压缩块盖了哪几轮和它的标题、以及现在能压到哪里。' +
-      '看当前的分层结构、每层占用、以及「可压位置」。提醒和 compress 的结果里都会附一张刷新的地图，' +
+      '看当前的分层结构、每层占用、以及「可压位置」。提醒和 compress 的拒绝回执会附一张刷新的地图；' +
+      '所有 compress 成功回执都只有一行占用——本轮已经结束，不要再取地图。' +
       '所以只有在你手上还没有地图、或者怀疑地图过期时才需要单独调这个工具；' +
       'compress 里的位置写法只能从地图里抄（序号 1 = 该区最老的块，轮号是 T 开头的那个）。',
     parameters: { type: 'object', properties: {} },
@@ -1745,24 +1757,29 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
       }
       log('compress-ok', { keys: result.results.map((r) => r.key), prunedChars: result.prunedChars })
       // 登记待折叠：真正的替换发生在下一次 pre-step（那时工具返回才存在）。
-      // 注意顺序：刷新后的地图必须在 rememberFold **之前**并进 lines，否则它跟着被折掉的结果一起消失——
-      // 模型既看不到地图，又以为"地图随结果来了"，下一次照旧位置压，必被拒。
-      // 设计稿 §2.7 / §11 要求压缩成功也带刷新后的地图（ae398aa 起就是行为约定）。
-      const mapText = fullMap(ctx, agent, config, log, scene)
+      // 所有成功回执都只给一行占用，不再给完整地图/可压位置——
+      // 2026-11-21 真机日志证明，那份刷新地图会被模型当成"还能再压"的菜单，
+      // 即使写着"不要再压第二次"也照样连压；root-line/plain/子代理同理。
+      const wake = scene === 'root-wake'
+      const summaryText = compactMap(ctx, agent, config, log, scene)
       const lines = receiptLines(result.results, {
         prunedChars: result.prunedChars,
         // 切点跨过了缺轮：说明一句，免得块头标签（只写到 to）看起来像漏压了内容。
         swallowed: result.results.flatMap((r) => (Array.isArray(r.swallowed) ? r.swallowed : [])),
-        mapText,
+        summaryText,
+        // root-wake 首行先说结束；其它场景是结果 → 一行占用 → 继续。
+        stopFirst: wake,
         // 只有轮末叫醒的压缩专用轮用"到此结束"；到线/子代理/plain（用户轮自行压缩）都要继续任务。
         continueLine: sceneContinues(scene),
       })
-      if (mapText) issueFor(ctx, agent, log)
       // 压缩把用量压下去了，但提醒的"上次量"基线还停在压缩前：不重设的话 grew 会长期为负，
       // 增长触发（notice.growthTokens）要等用量爬回压缩前的高度才可能再响——等于报废。
       resetGrowthBaseline(ctx, agent, config, reminded, log)
       // 开关关着就不登记：登记了也没人消费，等到重开那天全是「已经进过请求」的节点。
-      if (config.foldCallRecord !== false) rememberFold(foldQueueFor(foldQueues, agent.id), exec.callId, lines.slice(), callSeq)
+      // leadFirst 把 root-wake 的首行结束句放到折叠注标题后、'你刚刚做过…'之前。
+      if (config.foldCallRecord !== false) {
+        rememberFold(foldQueueFor(foldQueues, agent.id), exec.callId, lines.slice(), callSeq, wake)
+      }
       return { text: lines.join('\n') }
       } catch (error) {
         log('compress-execute', { error: errText(error) })
@@ -1834,6 +1851,19 @@ function fullMap(ctx, agent, config, log, scene = null) {
   } catch (error) {
     // 回执里少一张地图，模型就只能凭记忆压——这种退化必须能在日志里看见。
     if (typeof log === 'function') log('full-map-failed', { error: errText(error) })
+    return ''
+  }
+}
+
+// 所有成功回执都只给一行占用概况：本轮已经压完，不需要再把「可压位置」递给模型。
+// 只复用地图的总量行，不生成块表/可压区间/须知；失败时退化成空串，回执仍能收手。
+function compactMap(ctx, agent, config, log, scene = null) {
+  try {
+    const session = ctx.sessions.get(agent.id)
+    const usage = session ? readUsage(ctx, session, config) : null
+    return renderMap(ctx, agent, config, usage, isSubagent(ctx, agent), null, scene, true).text || ''
+  } catch (error) {
+    if (typeof log === 'function') log('compact-map-failed', { error: errText(error) })
     return ''
   }
 }
