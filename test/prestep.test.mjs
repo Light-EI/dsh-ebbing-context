@@ -6,10 +6,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, sceneContinues, sceneOfFlags, RECEIPT_CONTINUE_LINE, RECEIPT_STOP_LINE, RECEIPT_WAKE_TOP_LINE } from '../index.js'
+import { apply, describeResults, foldPending, receiptLines, resetGrowthBaseline, sceneContinues, sceneOfFlags, RECEIPT_CONTINUE_LINE, RECEIPT_STOP_LINE, RECEIPT_WAKE_TOP_LINE, REMINDER_HEADER } from '../index.js'
 import { readGrowth } from '../lib/state.js'
 import { DEFAULTS } from '../lib/config.js'
-import { FOLD_NOTE_HEAD } from '../lib/callfold.js'
+import { FOLD_NOTE_HEAD, FOLD_NOTE_MARK } from '../lib/callfold.js'
 
 let passed = 0
 const check = async (name, fn) => {
@@ -314,8 +314,9 @@ await check('到线不再 followup：当步写内联提醒，提醒带完整地�
   assert.match(noticeText, /上下文已用 90%/)
   assert.match(noticeText, /压缩须知/, '提醒里必须带完整地图（须知段）')
   assert.doesNotMatch(noticeText, /能压（to 照抄，别自己数）/, '提醒不能用紧凑版顶替完整地图')
-  assert.match(noticeText.split('\n')[0], /自动提醒/, '提醒首行必须标明是插件注入的自动提醒')
-  assert.match(noticeText.split('\n')[0], /不是用户/, '提醒首行必须说明这不是用户发言')
+  assert.equal(noticeText.split('\n')[0], REMINDER_HEADER, '提醒首行只保留一条「自动提醒 · 插件注入」身份标记')
+  assert.doesNotMatch(noticeText, /不是用户说的话/, '不再刻意强调不是用户；身份标记已经足够')
+  assert.ok(!noticeText.includes(FOLD_NOTE_MARK), '提醒正文里不再另起哨兵')
   assert.equal(inline[0].data.source.kind, 'cordis-host-runner', '提醒的 source.kind 必须是宿主登记过的')
   assert.match(noticeText, /请在一次压缩中完成，不要分多次压缩/, '提醒要明确说"一次压缩完成"')
   assert.match(noticeText, /把要压的层一起给全（深浅同批，区间自己权衡/, '级联句要区分"层给全"与"区间大小"')
@@ -609,6 +610,27 @@ await check('根会话被增长叫醒的轮里跨到线：到线仍要内联提�
   assert.doesNotMatch(mixed, /压完继续当前任务/, '混合轮不能出现“继续当前任务”')
   assert.doesNotMatch(mixed, /不要因为这次提醒结束本轮/, '混合轮不能出现“不要结束本轮”')
   assert.doesNotMatch(mixed, /这一轮是轮内到线提醒/, '混合轮不能印到线须知')
+})
+
+await check('投递前替换旧哨兵提醒：升级后旧提醒仍被认成自己的，不排队两条', async () => {
+  const session = blockSession(5, 150)
+  session.requestContext = () => ({ contextWindow: 4000 })
+  session.used = 200
+  const ctx = usageCtx(session)
+  apply(ctx, { ...DEFAULTS, reservedTokens: 0, triggerPct: 0.75, keepTurns: 1, notice: { ...DEFAULTS.notice, growthTokens: 50 } })
+  const agent = wakeAgent()
+  const stale = { id: 'stale-sentinel', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: FOLD_NOTE_MARK + '旧提醒' }], source: { kind: NOTICE_KIND } }
+  agent.inbox.nextTurn.push(stale)
+  const t1 = STEP(5, 1, { agent })
+  await ctx.handlers.get('agent/pre-step')(t1, () => {})
+  session.used = 300
+  session.seq += 1
+  await ctx.handlers.get('agent/pre-step')(STEP(5, 2, { agent }), () => {})
+  await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t1.signal }, () => {})
+  assert.equal(agent.replaced.length, 1, '必须原地替换旧提醒，而不是再塞一条')
+  assert.equal(agent.followups.length, 0, '替换后不再 followup')
+  assert.equal(agent.inbox.nextTurn.length, 1, '队列里仍只有一条提醒')
+  assert.match(String(agent.inbox.nextTurn[0].content[0].text), /Ebbing Context 自动提醒 · 插件注入/, '旧提醒被替换成本轮新提醒')
 })
 
 await check('轮末叫醒提醒：首行压缩专用轮标记、正文与地图都收手', async () => {
@@ -1023,7 +1045,7 @@ await check('到线内联不碰 inbox：已有旧提醒也照常写表层', asyn
   const ctx = usageCtx(session)
   apply(ctx, LINE_CONFIG)
   const agent = wakeAgent()
-  const stale = { id: 'stale-1', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: '〔Ebbing Context 插件注入〕旧提醒' }], source: { kind: 'cordis-host-runner' } }
+  const stale = { id: 'stale-1', role: 'user', createdAt: Date.now(), content: [{ type: 'text', text: FOLD_NOTE_MARK + '旧提醒' }], source: { kind: 'cordis-host-runner' } }
   agent.inbox.nextTurn.push(stale)
   const s3 = STEP(3, 1, { agent })
   await ctx.handlers.get('agent/pre-step')(s3, () => {})

@@ -117,10 +117,15 @@ const OUR_KINDS = new Set([NOTICE_KIND, MARKER_KIND, FOLD_KIND])
 // 宿主的注入类型会继续长，枚举补不完；未知 kind 现在一律不算用户。
 // 没有 source 的消息仍按用户处理：老宿主/测试桩可能没有 source，不能把真用户漏掉。
 const USER_KINDS = new Set(['user', 'user-question-reply', 'schedule'])
-// 插件自己写的每条消息都带这行哨兵（设计约束）：kind 是借来的展示身份，哨兵才是真身份。
-// 宿主的 cordis-host-runner 消息不会带它，所以我们不会把它误认成自己的旧提醒，
+// 折叠注/超窗提示/读表失败提示带这行通用哨兵；提醒用下面的 REMINDER_HEADER。
+// 轮次标记只按 source.kind（MARKER_KIND）认领，正文不写哨兵。
+// kind 是借来的展示身份，正文里的身份标记才是真身份。
+// 宿主的 cordis-host-runner 消息不会带这两种标记，所以我们不会把它误认成自己的旧提醒，
 // 也不会把它的文字当成"用户开口了"。
 const OWN_SENTINEL = '〔Ebbing Context 插件注入〕'
+// 提醒首行只写这一行：既自报"自动提醒/插件注入"，也继续充当提醒的身份判据。
+// 不再额外压一条独立哨兵——两条「插件注入」并排语义重复，用户 2026-11-21 裁定删掉。
+export const REMINDER_HEADER = '〔Ebbing Context 自动提醒 · 插件注入〕'
 
 // 成功回执的每一行：单位按层分（原文区数“条消息”，区块数“个块”）。
 // 抽成导出函数是为了能被测试直接钉住——第六轮审查 A/B 都指出这几行没人守，
@@ -1270,12 +1275,14 @@ function messageTextOf(message) {
   }
 }
 
-// 是我们写的提醒吗？kind 只说明"这类消息"，哨兵才说明"这一条是我们写的"。
-// 宿主自己的 cordis-host-runner 消息不带哨兵，所以不会被我们当成旧提醒覆盖掉。
+// 是我们写的提醒吗？kind 只说明"这类消息"，首行身份标记才说明"这一条是我们写的"。
+// 提醒用带"自动提醒"的 REMINDER_HEADER；折叠注/超窗提示用通用哨兵；轮次标记只按 source.kind。
+// 宿主自己的 cordis-host-runner 消息不带这两种标记，所以不会被我们当成旧提醒覆盖掉。
 function isOwnNotice(message) {
   if (!message || !message.source || !OUR_KINDS.has(message.source.kind)) return false
   if (message.source.kind === MARKER_KIND) return true
-  return messageTextOf(message).includes(OWN_SENTINEL)
+  const text = messageTextOf(message)
+  return text.includes(OWN_SENTINEL) || text.includes(REMINDER_HEADER)
 }
 
 // 认领到的消息里只要有一条不是我们发的，就说明用户（或别的流程）开口了。
@@ -1300,7 +1307,7 @@ function noteUserSpoke(state, payload) {
     changed = true
   }
   // 只有'kind 不是我们这类'的消息才算用户开口（回归修复）：宿主自己的 cordis-host-runner
-  // 通知与我们同 kind 但不带哨兵，那种既不算我们、也不算用户说话，闸门不能因此解开。
+  // 通知与我们同 kind 但不带身份标记，那种既不算我们、也不算用户说话，闸门不能因此解开。
   // 任意步都要看：宿主每个 step 都 claim 一次 next-step，用户可以在叫醒轮中途插话。
   // 但普通用户轮第 1 步认领到的就是用户自己的提问，不是"插话"：只有这一轮本来就是
   // 叫醒轮（autoTurn === turn）时才记 spokeTurn，否则到线轮的地图会被误降成 plain（回归修复）。
@@ -1545,10 +1552,9 @@ function noticeText(ctx, config, record, count, log) {
 
   return (
     // 首行必须自报家门：宿主把它作为一条 user/message 交给模型，模型默认会当成"用户说的"。
-    // 说清是谁发的、这不是用户发言，模型才不会把提醒里的数字当成用户给的要求。
-    '〔Ebbing Context 自动提醒 · 插件注入，不是用户说的话〕\n' +
-    // 哨兵：身份判据（isOwnNotice）。借来的 kind 只负责展示，哨兵才说明"这条是我们写的"。
-    OWN_SENTINEL + '\n' +
+    // 「自动提醒 · 插件注入」已经说清是谁发的；不再额外写"不是用户说的话"（语义重复）。
+    // 这一行同时是提醒的身份判据（isOwnNotice），不再另起一行哨兵。
+    REMINDER_HEADER + '\n' +
     // 压缩专用轮标记：模型一眼就能分清"这一轮压完要收手"还是"压完继续干活"。
     (wake ? '〔这一轮是压缩专用轮：压完就结束本轮〕\n' : '') +
     parts.join('') +
