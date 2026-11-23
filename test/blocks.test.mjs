@@ -107,7 +107,7 @@ const single = resolveZoneIndex(fake, 'l2', 1)
 check('该区只有 1 块时说清楚"暂时没得压"', !single.ok && /只有 1 块/.test(single.reason), JSON.stringify(single))
 
 check('keepTurns 只在最后几轮上生效：keep=0 时 T1 可压', resolveTurnAnchor(zones, 'T1', 0).ok)
-// keepTurns 保的是「最近 N 个已结束的轮」（设计约束）：当前是第 2 轮时，
+// keepTurns 保的是「最近 N 个已结束的轮」（用户 m21608）：当前是第 2 轮时，
 // 已结束的只有 T1，keep=1 就该把它留住——一个都不压。
 check('keep=1 时第 2 轮已无可压（唯一结束的轮被保住）', !resolveTurnAnchor(zones, 'T1', 1).ok, JSON.stringify(resolveTurnAnchor(zones, 'T1', 1)))
 const kept = resolveTurnAnchor(zones, 'T1', 2)
@@ -146,7 +146,7 @@ const gapCtx = {
     : null),
 }
 const gapZones = readZones(gapCtx, session)
-// 缺轮不再报红、也不再夹上界（回归修复）：缺的那一轮没有自己的边界，
+// 缺轮不再报红、也不再夹上界（复核 A1 + 用户 m21608）：缺的那一轮没有自己的边界，
 // 但它的内容一直延续到下一个已知边界——`to` 写到它前一轮，切点落在 T4 起点之前，
 // 顺手把缺掉的轮一起压掉。标签粗一点，切点仍然是真边界。
 check('大纲缺一轮（1,2,4）不再报红', gapZones.outlineFault === null, String(gapZones.outlineFault))
@@ -276,7 +276,7 @@ check('按节点取消息能拿到那一条自己的消息', (exactZones.message
 }
 
 // 没有投影 + 日志里有重号 turn/start（fork/迁移/异常重试的痕迹）：必须去重救回来，
-// 不能因为"单一来源没去重"就判 order、把整条对话停掉（回归修复）。
+// 不能因为"单一来源没去重"就判 order、把整条对话停掉（复核 0.1.16 A）。
 {
   const log = []
   log[5] = { type: 'turn/start', data: { turn: 1 } }
@@ -330,7 +330,7 @@ check('按节点取消息能拿到那一条自己的消息', (exactZones.message
   )
 }
 
-// 第八组：标记即锚点（回归修复）。标记是上下文里写死的轮号，边界以它为准。
+// 第八组：标记即锚点（复核二 B1）。标记是上下文里写死的轮号，边界以它为准。
 // 场景：T1 里某个节点被宿主机原位替换（pruneFirst 剪枝），拿到一个比 T2 起点更大的事件号，
 // 但位置仍在 T1 —— 按事件号算出来的交界会落到 T2 的「下一轮 T2」标记上，把 T1 的尾巴错算成 T2。
 // 以前的处理是报 outlineFault='marker' 停用整条对话，而触发它的正是我们自己的剪枝/压缩。
@@ -377,7 +377,7 @@ check(
   markerEntry ? String(markerEntry.turn) : 'missing',
 )
 
-// 第十组：标记补缺轮（设计约束）。投影里 T3 的 turn/start 丢了（fork / 迁移常见），
+// 第十组：标记补缺轮（用户 m21608）。投影里 T3 的 turn/start 丢了（fork / 迁移常见），
 // 但「本轮 T3」的标记还在表层上——标记是我们自己写的，位置就是地面真值，用它补回去。
 const healLog = []
 healLog[1] = { type: 'message', data: { message: { role: 'system', content: [{ type: 'text', text: 'sys' }] } } }
@@ -471,7 +471,7 @@ for (const bad of ['0x2', '1.0', ' 2x', 'two', '1e1']) {
   )
 }
 
-// 第十二组：认检查点只认来源标记，不再靠正文前面的那句英文（设计约束）。
+// 第十二组：认检查点只认来源标记，不再靠正文前面的那句英文（用户 m20237 第 5 条）。
 // 用户把那段英文贴进对话、或模型引用它，都不该被当成外来块。
 const preambleSession = {
   surface: { nodes: [5, 10, 20] },
@@ -488,12 +488,12 @@ check(
   JSON.stringify({ l0: pz.zones.l0.length, l1: pz.zones.l1.length }),
 )
 
-// 第十三组：宿主拍平之后只剩一个检查点 → 登记成 L3（设计约束）。
+// 第十三组：宿主拍平之后只剩一个检查点 → 登记成 L3（用户 m20237 第 5 条的裁定）。
 // 只有"除表头外只剩它"才这么做；夹在原文中间的仍按外来块进 L1（位置无从推断）。
 const flatSession = {
   surface: { nodes: [5, 9000] },
   // 出身核对：日志里真有这次压缩事务（compaction/start + compaction/summary 同 id），
-  // 才算"宿主真的压过"，这是升 L3 的前提（设计约束）。
+  // 才算"宿主真的压过"，这是升 L3 的前提（用户 m22499）。
   log: [
     { type: 'compaction/start', data: { compactionId: 'host1' } },
     { type: 'compaction/summary', data: { compactionId: 'host1' } },
@@ -512,7 +512,7 @@ check(
 check('L3 里那个外来块的 info 也是 tier 3', fz.info.get(9000) && fz.info.get(9000).tier === 3, JSON.stringify(fz.info.get(9000)))
 
 // 冒充的检查点：kind 对、compactionId 也有，但日志里根本没有这次压缩事务。
-// 内容是什么谁也不知道，只能当外来块留在 L1，绝不升 L3（设计约束）。
+// 内容是什么谁也不知道，只能当外来块留在 L1，绝不升 L3（用户 m22499）。
 const fakeLog = []
 const fakeSession = {
   surface: { nodes: [5, 9000] },
@@ -524,7 +524,7 @@ const fakeSession = {
 }
 const forged = readZones({ get: () => null }, fakeSession, null, (event, data) => fakeLog.push([event, data]))
 check(
-  '出身对不上的检查点：不收进 L1，当成原文区里的一段普通内容（设计约束）',
+  '出身对不上的检查点：不收进 L1，当成原文区里的一段普通内容（用户 m23991 裁定）',
   forged.zones.l1.length === 0 && forged.zones.l3.length === 0 && forged.zones.l0.some((n) => n.seq === 9000),
   JSON.stringify({ l0: forged.zones.l0.length, l1: forged.zones.l1.length, l3: forged.zones.l3.length }),
 )
@@ -571,7 +571,8 @@ check(
   JSON.stringify({ l0: mz.zones.l0.length, l1: mz.zones.l1.length, l3: mz.zones.l3.length }),
 )
 
-// 第十四组：标记与已知边界打架时只记 notes、不抛错（设计约束）。
+// 第十四组：标记与已知边界打架时只记 notes、不抛错（用户 m20237 第 6 条：准确性优先，
+// 但"标记过期"这种可恢复情形不该让整条对话停摆）。
 const clashSession = {
   surface: { nodes: [5, 10, 50, 60] },
   deriveMessages: () => [
@@ -655,7 +656,7 @@ check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮
   }
   const beforeZones = readZones({ get: () => null }, beforeSession, null, (e, d) => beforeLog.push([e, d]))
   check(
-    '真检查点前面还有原文：当成原文、不升 L3（设计约束）',
+    '真检查点前面还有原文：当成原文、不升 L3（用户 m23991）',
     beforeZones.zones.l3.length === 0 && beforeZones.zones.l1.length === 0 && beforeZones.zones.l0.some((n) => n.seq === 9000),
     JSON.stringify({ l0: beforeZones.zones.l0.length, l1: beforeZones.zones.l1.length, l3: beforeZones.zones.l3.length }),
   )
@@ -663,7 +664,7 @@ check('L3 里有一块轮号未知，但 l3 仍然可压（按块收，不看轮
   const rawEntry = beforeZones.zones.l0.find((n) => n.seq === 9000)
   check('当成原文的检查点也带 originSeq（块头 ev 范围才不会丢端点）', !!rawEntry && rawEntry.originSeq === 9000, JSON.stringify(rawEntry))
 
-  // 回归修复 R2：这条"有来历但前面还有内容"的日志要按节点去重，不能每个 pre-step 刷一条。
+  // 复核 qwen R2：这条"有来历但前面还有内容"的日志要按节点去重，不能每个 pre-step 刷一条。
   for (let i = 0; i < 3; i += 1) readZones({ get: () => null }, beforeSession, null, (e, d) => beforeLog.push([e, d]))
   const asRawTimes = beforeLog.filter(([e]) => e === 'foreign-block-as-raw').length
   check('foreign-block-as-raw 同一个节点只记一次（三个 pre-step 也只一条）', asRawTimes === 1, String(asRawTimes))
@@ -690,10 +691,10 @@ const missAnchor = resolveTurnAnchor(missZones, 'T4', 0)
 check('缺轮当 to：说清"这是缺轮、不能当 to"并列出缺的轮号',
   missAnchor.ok === false && /缺轮/.test(missAnchor.reason) && /T4/.test(missAnchor.reason),
   JSON.stringify(missAnchor))
-// 这里是「能写什么」，必须扣掉缺轮号：T4 是缺轮，可写上界只能到 T3（回归修复）。
+// 这里是「能写什么」，必须扣掉缺轮号：T4 是缺轮，可写上界只能到 T3（复核 B1）。
 check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现在能写的是 T1–T3/.test(missAnchor.reason) && !/T1–T4/.test(missAnchor.reason), missAnchor.reason)
 
-// 第二十二组：物理切点 vs 可写的 to（回归修复）
+// 第二十二组：物理切点 vs 可写的 to（复核：缺轮号不能同时出现在两句话里）
 {
   const zones = {
     currentTurn: 5,
@@ -707,9 +708,9 @@ check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现�
   const allMissing = { currentTurn: 2, zones: { l0: [{ seq: 1, turn: 1 }], l1: [], l2: [], l3: [] }, turnNotes: [{ turn: 1, reason: 'missing' }] }
   check('退到 0 就没有可写的 to', writableTo(allMissing, 0) === null)
   // 空轮（有 turn/start、表层上没有这一轮的正文）同样写不得：可写的 to 要往回落一格。
-  // 回归修复：以前只退缺轮，模型照地图写空轮号必吃一次拒绝。
+  // 复核 B2：以前只退缺轮，模型照地图写空轮号必吃一次拒绝。
   // fixture 必须让「空轮」真的落在 cutoff 上，否则 lastCompressibleTurn 的 lastRaw 夹一下，
-  // 新旧实现同值、断言空转（回归修复）。这里 T3 有 turn/start 但表层没有它的原文：
+  // 新旧实现同值、断言空转（复核 F1）。这里 T3 有 turn/start 但表层没有它的原文：
   // 物理切点=3（T3 的内容跟着前一轮被带走），可写的 to 必须退到 2。
   const emptyTurnZones = { currentTurn: 4, zones: { l0: [{ seq: 1, turn: 1 }, { seq: 2, turn: 2 }, { seq: 3, turn: 4 }], l1: [], l2: [], l3: [] }, turnNotes: [] }
   check('空轮也算写不得：可写的 to 往回落一格，物理切点不动',
@@ -717,7 +718,7 @@ check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现�
     `${String(writableTo(emptyTurnZones, 0))} / ${String(lastCompressibleTurn(emptyTurnZones, 0))}`)
 }
 
-// 第二十三组：空轮与缺轮是两件事，文案要分开（回归修复）
+// 第二十三组：空轮与缺轮是两件事，文案要分开（复核 A#4）
 {
   const emptyTurnZones = {
     currentTurn: 4,
@@ -755,7 +756,7 @@ check('缺轮当 to 时给出可写的真实区间（不含缺轮号）', /现�
 }
 
 
-// 第二十四组：首界标之前的无主原文（回归修复）
+// 第二十四组：首界标之前的无主原文（复核 R4）
 {
   const um = (t) => ({ role: 'user', content: [{ type: 'text', text: t }] })
   const sess = {

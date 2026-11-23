@@ -192,7 +192,7 @@ function lineSession(used = 3600) {
 
 function usageCtx(session) {
   const ctx = fakeCtx(session)
-  // 会话搜索必须装着：提醒现在走同一道闸门（回归修复），没装就不叫醒。
+  // 会话搜索必须装着：提醒现在走同一道闸门（复核 C1），没装就不叫醒。
   ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
   ctx.tokenMeter = { measure: () => ({ totalTokens: session.used }) }
   return ctx
@@ -1852,7 +1852,7 @@ await check('用量瞬时归零不把基线压成 0（防下一步凭空报增�
 
 
 await check('轮次大纲缺一轮：不再打红（夹住上界即可，fork/迁移的会话照常可用）', async () => {
-  // 回归修复 + 设计约束：缺一轮的边界确实不可知，但那是宿主恢复留下的正常痕迹。
+  // 复核 A1 + 用户 m20995：缺一轮的边界确实不可知，但那是宿主恢复留下的正常痕迹。
   // 现在的做法是把可压上界夹到缺轮之前，而不是让整条对话永久停摆。
   const messages = [
     { role: 'user', content: [{ type: 'text', text: 'a' }] },
@@ -2144,7 +2144,7 @@ await check('每步只扫一遍表层（三个用途共用同一份，不再各�
   assert.ok(bothSteps - firstStep <= 1, '第二步也最多一次，实际多了 ' + (bothSteps - firstStep) + ' 次')
 })
 
-// 超窗口（设计约束）：宿主自带压缩默认开着，它会在同一条 request-error 上
+// 超窗口（用户 m20198 第 2 条）：宿主自带压缩默认开着，它会在同一条 request-error 上
 // 自己救一次并 retry。第一次就宣布"没救"是假话，所以第一次只给中性提示、不动自动续作；
 // 连着第二次还超，才认死并缴械。
 await check('超窗口：第一次只给中性提示、不动自动续作；连着第二次才缴械', async () => {
@@ -2210,7 +2210,7 @@ await check('超窗口：中间成功收尾过一轮，计数清零（重新从"
 })
 
 // 静默子代理（notifySubagents=false）收尾时插件早退，但超窗计数必须照样清零——
-// 否则它自愈一次之后再超一次，就会被误判成"连着两轮"并缴掉它的自动续作（回归修复）。
+// 否则它自愈一次之后再超一次，就会被误判成"连着两轮"并缴掉它的自动续作（复核 0.1.16 B1）。
 await check('超窗口：静默子代理收尾也会清零，不会把两次隔轮超窗算成"连着两轮"', async () => {
   const session = usageSession(100)
   const ctx = usageCtx(session)
@@ -2432,7 +2432,7 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '停用期间掉下线的复位丢了 → 这里就永远不报（复核 qwen R3）')
   assert.match(String(onlyKind(session, NOTICE_KIND)[1].data.content[0].text), /上下文/, '发的应该还是到线提醒')
 })
 await check('没装会话搜索插件：不写提醒（地图、工具与到线 inline 都停用）', async () => {
@@ -2553,7 +2553,9 @@ await check('B3 回归：关掉会话搜索时，系统提示不再承诺「按�
   const captured = []
   ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
   apply(ctx, { ...DEFAULTS, requireSessionQuery: false })
-  const text = captured.map((t) => (typeof t === 'function' ? t({ agent: { id: 'a1' } }) : t)).join('')
+  const text = captured.map((t) => (typeof t === 'function' ? t({ session }) : t)).join('')
+  const legacy = captured.map((t) => (typeof t === 'function' ? t({ agent: { id: 'a1' } }) : t)).join('')
+  assert.equal(legacy, text, '旧宿主的 context.agent 路径仍要能得到同一份根提示')
   assert.match(text, /若装了会话搜索/, '要说清能不能查回来取决于装没装，不能无条件承诺')
   assert.doesNotMatch(text, /按事件号能查回来。/, '不能把一定查得回来说死')
   assert.doesNotMatch(text, /compress 与 context_map 会直接停用/, '开关关掉时不会停用，别这么说')
@@ -2570,8 +2572,7 @@ await check('子代理系统提示：说轮内提醒，不再说“收尾叫醒�
   const captured = []
   ctx.get = (name) => (name === 'systemPrompt' ? { section: (s) => { captured.push(s.text); return () => {} } } : name === 'commands' ? { register: () => () => {} } : undefined)
   apply(ctx, { ...DEFAULTS })
-  const agent = { id: 'sub-prompt', session }
-  const text = captured.map((t) => (typeof t === 'function' ? t({ agent }) : t)).join('')
+  const text = captured.map((t) => (typeof t === 'function' ? t({ session }) : t)).join('')
   assert.match(text, /每轮开头/, '子代理提示要说轮首/轮内')
   assert.match(text, /不会在轮后另开压缩轮/, '要明确不再轮后开压缩轮')
   assert.doesNotMatch(text, /一轮收尾把你叫醒一次/, '子代理不能再说收尾叫醒')

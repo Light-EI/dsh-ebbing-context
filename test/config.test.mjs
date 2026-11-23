@@ -137,7 +137,7 @@ try {
   console.error("FAIL 老配置 forgivePct 让插件拒绝启动：" + error.message)
   failed += 1
 }
-// keepTurns 取整必须发生在运行时出口（回归修复）：`validateConfig` 改的是解引用后的副本，
+// keepTurns 取整必须发生在运行时出口（复核二 B2）：`validateConfig` 改的是解引用后的副本，
 // 插件真正读的是 `mergeConfig(raw)` 的结果——那里不取整，地图就会写出 `to=T3.5` 这种解析不了的号。
 {
   const merged = mergeConfig({ keepTurns: 1.5 })
@@ -162,7 +162,7 @@ pass0: {
   if (normal.keepTurns !== 3) throw new Error('正常值不该被改，实际 ' + JSON.stringify(normal.keepTurns))
 }
 
-// 类型不对是"配置有错"，必须拒绝启动——不能悄悄花成默认值（设计意图回归修复：
+// 类型不对是"配置有错"，必须拒绝启动——不能悄悄花成默认值（设计意图复核 P6：
 // 曾经用 Number() 强转，"abc" 会静默变成默认的 2，而 validateConfig 一条错都不报）。
 reject('keepTurns 写成字符串', { keepTurns: 'abc' }, 'keepTurns')
 reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
@@ -174,8 +174,8 @@ reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')
   total++
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const range = String(pkg.peerDependencies && pkg.peerDependencies['@deepseek-ai/dsh-llm'])
-  if (!range.endsWith('<=0.2.2-rc.5') || /<0\.3(?![.\d])/.test(range)) {
-    console.error(`FAIL peer 兼容上限必须是已核对的 0.2.2-rc.5（不许 <0.3）: ${range}`)
+  if (!range.endsWith('<=0.2.3-alpha.2') || /<0\.3(?![.\d])/.test(range)) {
+    console.error(`FAIL peer 兼容上限必须是已核对的 0.2.3-alpha.2（不许 <0.3）: ${range}`)
     failed++
   }
 }

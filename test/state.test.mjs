@@ -162,7 +162,7 @@ try {
   utimesSync(tmpFileOf(tieId), later, later)
   check('updatedAt 并列时按文件 mtime 取更新的那份', readGrowth(tieId) && readGrowth(tieId).tokens === 22, JSON.stringify(readGrowth(tieId)))
 
-  // 去重的状态切换：失败 → 退临时目录 → 恢复正常 → 再失败，每次切换记一条（回归修复）
+  // 去重的状态切换：失败 → 退临时目录 → 恢复正常 → 再失败，每次切换记一条（复核 minor）
   {
     const transId = `${uniq}-trans`
     const transSt = { tokens: 1, growthQuota: null, lineOn: false }
