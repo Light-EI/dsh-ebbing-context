@@ -1,4 +1,4 @@
-// 图片计价：宿主按路由声明的真实价，拿不到就退回固定 800（用户 m20237 第 7 条）。
+// 图片计价：宿主按路由声明的真实价，拿不到就退回固定 800（设计约束）。
 // 跑法：node plugin/test/imageprice.test.mjs
 import assert from 'node:assert'
 import { imagePrices } from '../lib/imageprice.js'

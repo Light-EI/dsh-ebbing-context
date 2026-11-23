@@ -88,7 +88,7 @@ check('取不到窗口时只报两个总量、不渲染实际输入上限', /^�
 check('地图带区上限数值（L1/L2/L3 三行都在）', /L3/.test(text) && /L2/.test(text) && /L1/.test(text))
 check('地图带块表（序号/区/覆盖轮次/token/标题）', /序号?按区各自从 1 起/.test(text) && /覆盖轮次/.test(text), text.slice(0, 400))
 check('地图里能看见块的标题', /git 基线与环境事实/.test(text))
-// 区上限那一列必须真在，而且超线时要标 ⚠（第六轮审查 B：原来只验 /L1|L2|L3/ 字样出现过，
+// 区上限那一列必须真在，而且超线时要标 ⚠（回归修复：原来只验 /L1|L2|L3/ 字样出现过，
 // 把实现改成"上限恒打 —""永不标超限"都照样全绿；而地图是模型决定压不压的唯一依据）。
 const pressureRow = (zone) => new RegExp(`${zone}\\s+[\\d,]+（[\\d.]+%）\\s+[\\d,]+\\s+\\d+ token`).test(text)
 check('L3/L2/L1 三行都把"已用（占比）区上限 单块上限"四个数写全',
@@ -165,7 +165,7 @@ const gapCtx = {
 }
 const gapText = renderMap(gapCtx, agent, config, usage).text
 check('缺轮时地图说明原因（不再只说可写 to=T1）', /缺了/.test(gapText) && /没有自己的边界/.test(gapText), gapText.slice(0, 400))
-// 第六轮审查 A#2：缺的轮号要单独列出来并说明写不得，不能让模型照抄主句的区间。
+// 回归修复：缺的轮号要单独列出来并说明写不得，不能让模型照抄主句的区间。
 // 这里要让它真的走到"可写 to=T2–T3"那一支，所以原文写长一点（不足 300 token 会走"太小"分支）。
 const longNodes = [5, 9000, 50, 60]
 const longMessages = [
@@ -189,13 +189,13 @@ const longGapCtx = {
 const longGapText = renderMap(longGapCtx, agent, config, usage).text
 check('缺轮时单独列出「写不得」的轮号', /缺的轮号 T3/.test(longGapText) && /写不得/.test(longGapText), longGapText.slice(0, 600))
 // 回归修复：可写的 to 不能把缺轮号包进去（之前同一行里既写 T2–T3、又说 T3 写不得）。
-// 断言三件事：有可写区间、区间里没有缺轮号、不出现 T2–T2 这种同值区间（复核 F2/B6）。
+// 断言三件事：有可写区间、区间里没有缺轮号、不出现 T2–T2 这种同值区间（回归修复）。
 check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
   /可写 to 的轮号：T\d+(?:…T\d+)?（/.test(longGapText) && !/可写 to 的轮号：[^（]*T3/.test(longGapText)
     && !/可写 to 的轮号：T(\d+)…T\1/.test(longGapText),
   longGapText.slice(0, 600))
-// 用户 m21212 裁定：l0 行的括号里要带上取舍口径，别让"可写"看起来像"该压"。
-// 断言必须按行钉：光钉短语在整张图里出现过，把它挪到"压缩须知"下面测试照样绿（复核 0883a196）。
+// 设计约束 裁定：l0 行的括号里要带上取舍口径，别让"可写"看起来像"该压"。
+// 断言必须按行钉：光钉短语在整张图里出现过，把它挪到"压缩须知"下面测试照样绿（回归修复）。
 {
   const l0Line = longGapText.split('\n').find((l) => l.startsWith('l0')) || ''
   check('l0 行的括号里说明"只压已经收尾的、还在推进的留着"',
@@ -203,7 +203,7 @@ check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
     l0Line.slice(0, 700))
 }
 
-// 只有一个可写轮时写单值 `可写 to=T1（`，不能写成 `T1–T1`（复核 B6 的真形态）。
+// 只有一个可写轮时写单值 `可写 to=T1（`，不能写成 `T1–T1`（回归修复）。
 {
   // turn/start 必须自己也占一个表层节点，readZones 才能把它映射成边界（否则整段都是"无主原文"）。
   const oneSession = {
@@ -239,7 +239,7 @@ check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
 }
 
 
-// 无主原文：地图必须点出来（复核 R4）——首界标之前的消息没有轮号，不说出来模型会以为它不存在。
+// 无主原文：地图必须点出来（回归修复）——首界标之前的消息没有轮号，不说出来模型会以为它不存在。
 {
   const um = (t) => ({ role: 'user', content: [{ type: 'text', text: t }] })
   const orphanSession = {
@@ -258,14 +258,14 @@ check('可写轮号不含缺轮号（T3 缺 → 上界退到 T2）',
   const orphanCtx = { sessions: { get: () => orphanSession }, get: () => null }
   const orphanText = renderMap(orphanCtx, agent, config, usage).text
 check('有首界标之前的无主原文时，地图要说出来', /没有轮号的消息/.test(orphanText), orphanText.split('\n').filter((l) => /可写 to|没有轮号/.test(l)).join(' / '))
-check('措辞：这句要说「这些内容会被一起压进第一块」（复核 A-N6）', /这些内容会被一起压进第一块/.test(orphanText), orphanText)
+check('措辞：这句要说「这些内容会被一起压进第一块」（回归修复）', /这些内容会被一起压进第一块/.test(orphanText), orphanText)
 check('单条无主原文写成「事件号 1」，不写成 1–1', /事件号 1）/.test(orphanText) && !/事件号 1–1/.test(orphanText), orphanText.split('\n').find((l) => /没有轮号/.test(l)) || '')
 check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orphanText.match(/没有轮号的消息/g) || []).length === 1, String((orphanText.match(/没有轮号的消息/g) || []).length))
 }
 
 
 // D1：`turnStarts === null`（投影没挂、日志也没有 turn/start）时，全部原文都没有轮号，
-// 那不是"无主原文"，地图不许说"最早的轮次记录丢了"（复核 D1）。
+// 那不是"无主原文"，地图不许说"最早的轮次记录丢了"（回归修复）。
 {
   const noTurnSession = {
     surface: { nodes: [5, 9000, 60] },
@@ -307,7 +307,7 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   const l1Line = (tinyText.split('\n').find((line) => line.startsWith('l1 ')) || '')
   check('L1 只有小块时地图写清"盖不住改写开销"', /盖不住一块的最小产物成本/.test(l1Line), l1Line)
   check('L1 只有小块时不再给出可写 to', !/可写 to 的序号/.test(l1Line), l1Line)
-  // 可压的时候必须把"还剩多少预算留给摘要+标题"写出来（设计意图复核 P3：150 当阈值两头都漏，
+  // 可压的时候必须把"还剩多少预算留给摘要+标题"写出来（设计意图回归修复：150 当阈值两头都漏，
   // 改成"给两端的事实"）。
   {
     const bigNodes = [1, 2, 3]
@@ -337,7 +337,7 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
     check('收益预算超过产物层上限时，地图把单块上限也写出来',
       /摘要正文不超过 2000（L2 单块上限）/.test(hugeLine) && /摘要\+标题合计不超过 \d+ token 才过收益校验/.test(hugeLine), hugeLine)
   }
-  // to=1 的预算同样要按产物层上限截断（qwen 快审 1163c1a 的 Major：首块很大时给 2390，实际 L2 上限 2000）。
+  // to=1 的预算同样要按产物层上限截断（回归修复，实际 L2 上限 2000）。
   {
     const bigFirst = (i, n) => ({
       role: 'user',
@@ -353,7 +353,7 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   }
 }
 
-// 只有 2 块、首块够改写开销：可写序号只有一个（1），不能渲染成「1…1」（qwen 快审 15d6868/2f45f84 Minor）。
+// 只有 2 块、首块够改写开销：可写序号只有一个（1），不能渲染成「1…1」（回归修复）。
 {
   const msgs = [
     { role: 'system', content: [{ type: 'text', text: 'sys' }] },
@@ -366,7 +366,7 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   check('只有 2 块时可写序号写单值 1，不写 1…1', /可写 to 的序号：1（该区共 2 块/.test(line) && !/1…1/.test(line), line)
 }
 
-// 只有 2 块且首块不够地板时：必须走"暂不可用"，绝不能拼出 `to=2–1`（复核 1cf37da 指出的边界）。
+// 只有 2 块且首块不够地板时：必须走"暂不可用"，绝不能拼出 `to=2–1`（回归修复）。
 {
   const nodes = [1, 2]
   const msgs = [
@@ -380,7 +380,7 @@ check('这句提示只许出现一次（曾因两处拼接写成两遍）', (orp
   check('两块且首块不够地板时不拼出 to=2–1', !/to=2–1/.test(line), line)
 }
 
-// 首块单独不够改写开销时：表头不能再写「可写 to=1–N」（审计实测 97/166/116）。
+// 首块单独不够改写开销时：表头不能再写「可写 to=1–N」（回归修复实测 97/166/116）。
 {
   const sizes = [97, 166, 116]
   const nodes = [4, 1, 2, 3]

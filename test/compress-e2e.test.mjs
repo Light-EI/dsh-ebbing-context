@@ -304,7 +304,7 @@ async function case1() {
 
 
   // 默认路径（requireSessionQuery 未关）必须在块尾点名会话搜索工具：
-  // 复核 P3 的变异 M2b 证明这条此前没人守——工具名一旦被删，CI 全绿。
+  // 回归修复 的变异 M2b 证明这条此前没人守——工具名一旦被删，CI 全绿。
   const l0Text = textOf(a[2] && a[2].data)
   check('1p · 默认路径的块尾点名 session_event_read（开关关掉才不点名）',
     l0Text.includes('原文还在日志里。') && l0Text.includes('用 session_event_read 按事件号读。'),
@@ -544,7 +544,7 @@ async function case8() {
     !!(openCompaction(session) && openCompaction(session).compactionId), show(openCompaction(session)))
 }
 
-// 用例 8b：第一次写 end 失败、补写成功 —— 块已生效，回执也必须带 applied（复核 qwen F1）
+// 用例 8b：第一次写 end 失败、补写成功 —— 块已生效，回执也必须带 applied（回归修复）
 async function case8b() {
   const session = rawTwoTurns(400)
   const agent = agentFor('e2e-agent-8b')
@@ -576,7 +576,7 @@ async function case8b() {
 }
 
 // 用例 9：外来检查点按原文处理、并且真被 l0 压过一次 —— 块头 ev 范围必须有真数字。
-// （复核 qwen R1：bdcc3a2 引入过 ev undefined–undefined，当时没有 as-raw 的端到端用例，才漏过去。）
+// （回归修复）
 async function case9() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -616,7 +616,7 @@ async function case9() {
     header)
 }
 
-// 用例 10：许可证闸门的三条负例（第六轮审查 B：这一整道闸门此前零负例，
+// 用例 10：许可证闸门的三条负例（回归修复：这一整道闸门此前零负例，
 // 把 check() 改成永久放行，304 项断言照样全绿）。
 async function case10() {
   // 10a：没看过地图就压 → 拒。
@@ -671,7 +671,7 @@ async function case10() {
 }
 
 // 用例 11：切点跨过缺失的轮（swallowed）→ 块头必须把被吞的轮号算进来并打 `+`。
-// 审查 A#1：以前 frame() 不接 op.swallowed，块里含着 T3 的内容、块头却写「T1–T2」，
+// 回归修复：以前 frame() 不接 op.swallowed，块里含着 T3 的内容、块头却写「T1–T2」，
 // 地图和下一代都按更窄的范围理解，错会一直传下去。
 async function case11() {
   const s = fakeSession()
@@ -707,7 +707,7 @@ async function case11() {
   check('11d · 块头不是只写到 T3', !/T\d+–T3(?!\d)/.test(header), header)
 }
 
-// 用例 12：关掉 requireSessionQuery 时，块尾不许再点名 session_event_read（审查 A#3）。
+// 用例 12：关掉 requireSessionQuery 时，块尾不许再点名 session_event_read（回归修复）。
 async function case12() {
   const s = rawTwoTurns(400)
   const agent = agentFor('e2e-agent-12')
@@ -726,7 +726,7 @@ async function case12() {
   check('12d · 开关关掉时仍说清「原文还在」', /原文还在/.test(text), text.slice(-160))
 }
 
-// 用例 13：L3 区混「外来检查点（块头没有 ev）+ 我们自己的块」→ 折叠后事件号范围不能漏（复核 A-R1）
+// 用例 13：L3 区混「外来检查点（块头没有 ev）+ 我们自己的块」→ 折叠后事件号范围不能漏（回归修复）
 async function case13() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -759,7 +759,7 @@ async function case13() {
   check('13c · 取回线索也说到 3–12', /事件号 3–12/.test(text), text.slice(-200))
 }
 
-// 用例 14：级联缺 l0 时的提示要说「可写的 to」，不能把缺轮号包进去（复核 A-R2）
+// 用例 14：级联缺 l0 时的提示要说「可写的 to」，不能把缺轮号包进去（回归修复）
 async function case14() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -791,7 +791,7 @@ async function case14() {
     reason)
 }
 
-// 用例 15：首界标之前的无主原文（复核 R4）——块头必须写 T?–2，不能把下界当成 2。
+// 用例 15：首界标之前的无主原文（回归修复）——块头必须写 T?–2，不能把下界当成 2。
 async function case15() {
   const s = fakeSession()
   // 第 1 轮的 turn/start 丢了，内容还在（日志截断 / 老版本导入）。
@@ -819,7 +819,7 @@ async function case15() {
 }
 
 
-// 用例 16：下界未知的块被**再压一次**时，下界必须继续未知（复核 D2：以前会谎报成 T2+）。
+// 用例 16：下界未知的块被**再压一次**时，下界必须继续未知（回归修复）。
 async function case16() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -880,7 +880,7 @@ async function case17() {
 
 // 用例 18：块头没有 ev（外来检查点），正文里消息台账在前、图片台账在末行。
 // 台账正则以「压掉了 N 条消息 / 并掉了 N 个字块」为准，图片台账（`压掉了 2 张图片`）
-// 不许把事件号范围带偏（复核第七轮 P2：把图片分支加回正则，受影响的三个测试文件仍全绿）。
+// 不许把事件号范围带偏（回归修复）。
 async function case18() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -953,7 +953,7 @@ async function case20() {
 
 
 // 用例 22：L3 里同时有「事件号读不出的外来检查点」和「我们自己的带 ev 的块」→ 盲区告警与取回提示的先后
-// （复核 B 第十轮：这条分支可达，不是不可达——宿主的 /compact 在会话开头落成外来块，之后我们压 l2 得到的块追加在表层末尾）
+// （回归修复）
 async function case22() {
   const s = fakeSession()
   s.seed.turnStart(1)
@@ -1004,7 +1004,7 @@ async function case23() {
   check('23d · 表层确实变了', !deepEq(session.surface.nodes, beforeNodes), show(session.surface.nodes))
 }
 
-// 用例 21：散文里逐字模仿台账句式（但没写〔〕）不算台账信息（复核 A 的 N1）。
+// 用例 21：散文里逐字模仿台账句式（但没写〔〕）不算台账信息（回归修复）。
 async function case21() {
   const s = fakeSession()
   s.seed.turnStart(1)

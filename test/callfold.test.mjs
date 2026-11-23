@@ -328,7 +328,7 @@ check('精确路径：贴尾的一对照常折（尾部判据在精确路径也�
   assert.equal(session.appends.length, 1)
 })
 
-// 并发 compress 的闸门（复核二 B5）：以前只看表层最后一个节点。
+// 并发 compress 的闸门（回归修复）：以前只看表层最后一个节点。
 // 交错批 [pwsh, compressA, compressB] 里，pwsh 的返回先落进表层 —— 末节点是那条 tool 结果，
 // 计数会变成 0，闸门静默失效。现在改成往回找"第一张含工具调用的助手消息"。
 check('交错批：末节点是别的工具的返回，仍能数出两个 compress', () => {

@@ -128,7 +128,7 @@ const OWN_SENTINEL = '〔Ebbing Context 插件注入〕'
 export const REMINDER_HEADER = '〔Ebbing Context 自动提醒 · 插件注入〕'
 
 // 成功回执的每一行：单位按层分（原文区数“条消息”，区块数“个块”）。
-// 抽成导出函数是为了能被测试直接钉住——第六轮审查 A/B 都指出这几行没人守，
+// 抽成导出函数是为了能被测试直接钉住——回归修复都指出这几行没人守，
 // 改坏了（退回“N 条”双单位）测试照样全绿。
 export function describeResults(results) {
   return (Array.isArray(results) ? results : []).map(
@@ -192,7 +192,7 @@ export function apply(ctx, rawConfig = {}) {
   const pendingBySignal = new WeakMap() // 本轮信号 -> 待发记录
   const pendingByAgent = new Map() // agentId -> { signal, record }：只为清理异常收场留下的孤儿
   // agentId -> { turn, count }：这一轮报了超限，以及连着第几次。
-  // 为什么要计数（用户 m20198 第 2 条）：宿主自带的压缩默认开着（auto: true），
+  // 为什么要计数（设计约束）：宿主自带的压缩默认开着（auto: true），
   // 它会在同一条 request-error 上自己救一次并返回 retry。我们要是当场就宣布"没救"、
   // 顺手把自动续作缴械，那句话就是假话——所以第一次只给中性提示，连着第二次才认死。
   // 成功收尾（turn-stopping 会来）就清零，下一次超限重新从"可能能自愈"开始。
@@ -209,11 +209,11 @@ export function apply(ctx, rawConfig = {}) {
     overflowSaid.delete(id)
     foldQueues.delete(id)
     // 按步的用量缓存也清掉：以前只在 compress 出口删自己的键，从不压缩的代理（尤其子代理）
-    // 会一直留一条 agentId → 步戳（复核 0.1.16 B3）。
+    // 会一直留一条 agentId → 步戳（回归修复）。
     stepStamps.delete(id)
     currentSteps.delete(id)
     // beginUsageStep 在 session.id 与 agentId 不同时还会记第二个键（readUsage 手上只有 session）：
-    // 那个键也要跟着回收，否则每注销一个代理就残留一个短字符串（复核 glm 第二轮）。
+    // 那个键也要跟着回收，否则每注销一个代理就残留一个短字符串（回归修复）。
     const goneSession = ctx.sessions.get(id)
     if (goneSession && typeof goneSession.id === 'string' && goneSession.id !== id) stepStamps.delete(goneSession.id)
     forget(id)
@@ -373,7 +373,7 @@ export function apply(ctx, rawConfig = {}) {
       if (stepSession) stepZones = readZones(ctx, stepSession, payload.agent, log)
     } catch (error) {
       // 读不到表层就退化成"这一步没有区快照"：后面的提醒会少一张地图。
-      // 以前这里是一个空 catch，日志里一个字都没有，出了问题查不到（第六轮审查 B）。
+      // 以前这里是一个空 catch，日志里一个字都没有，出了问题查不到（回归修复）。
       if (typeof log === 'function') log('read-zones-failed', { error: errText(error) })
     }
     const broken = quiet ? null : fatalOutline(ctx, payload, stepZones, log)
@@ -425,12 +425,12 @@ export function apply(ctx, rawConfig = {}) {
     try {
       if (isSubagent(ctx, payload.agent) && !(config.notice && config.notice.notifySubagents)) {
         // 静默子代理也要清超窗计数：它同样会走 request-error 记一笔，而收尾被这里早退，
-        // 攒两次就变成"连着两轮超窗"、误停它的自动续作（复核 0.1.16 B1）。
+        // 攒两次就变成"连着两轮超窗"、误停它的自动续作（回归修复）。
         if (payload.agent && payload.agent.id) overflowSaid.delete(payload.agent.id)
         if (payload.agent && payload.agent.id) currentSteps.delete(payload.agent.id)
         return
       }
-      // 收尾前补一次折叠（用户 m20233 同意）：压缩恰好是本轮最后一个动作时（被截断、
+      // 收尾前补一次折叠（设计约束）：压缩恰好是本轮最后一个动作时（被截断、
       // 用户点了停止、没有下一步了），下面写轮次标记会把「调用 + 返回」挤出队尾，
       // 下一轮只能判 not-tail 永久放弃——那份参数副本和整张地图此后每轮都要再发一遍。
       // 这里先折一次：只折队尾那一对（缓存不变式不变），折不成就算了，不重试。
@@ -462,7 +462,7 @@ export function apply(ctx, rawConfig = {}) {
 
   // 真的超了：只报一句，不自动压缩、不重试、不改写历史。
   // 同一轮只报一条：宿主可能在同一轮里重试多次，不去重会把这句话刷屏。
-  // 两次判定（用户 m20198 第 2 条）：宿主的 compaction-basic 默认 auto: true，它会在
+  // 两次判定（设计约束）：宿主的 compaction-basic 默认 auto: true，它会在
   // 同一条 request-error 上做 overflow 恢复并返回 retry。第一次超限就宣布"没救"是假话，
   // 所以第一次只给中性提示（不 disarm）；连着第二次还超，才认死并停掉自动续作。
   ctx.on('agent/request-error', async (payload, next) => {
@@ -555,7 +555,7 @@ export function foldPending(ctx, config, queues, payload, log) {
       // 折叠只替换尾部的「调用 + 返回」两条 raw 节点，三层块的 seq 一个都没动；
       // 许可证指纹也只盯这三层的 seq（见 lib/license.js），所以这里不需要再对齐什么。
       // 曾经在此 { restate(id, session, readZones(...)) }：那会让每步多扫一遍表层，
-      // 而按现在的指纹口径它本来就是恒等运算（复核三）。
+      // 而按现在的指纹口径它本来就是恒等运算（回归修复）。
       // 成功就抹掉上一次的失败记录：那个错误已经被下一轮覆盖掉了，不该一直挂在状态里。
       queue.lastError = null
       queue.lastSkip = null
@@ -630,7 +630,7 @@ function isSubagent(ctx, agent) {
     const id = agent && agent.id
     // 载荷没带 agent（turn-stopping 契约不保证带）：无法判定就按根处理，绝不静默主会话。
     // 旧代码在 id 缺失时 roots.some 无匹配 → 判子代理（更早的 includes 形态同样恒真），
-    // 会把主会话误判成子代理、整轮收尾（flushNotice/settleGrowth/markNextTurn）全跳过——GLM 审查 Minor 1 的既有隐患。
+    // 会把主会话误判成子代理、整轮收尾（flushNotice/settleGrowth/markNextTurn）全跳过——回归修复。
     if (!id) return false
     const agents = ctx.agents || (typeof ctx.get === 'function' ? ctx.get('agents') : null)
     if (agents && typeof agents.roots === 'function') {
@@ -697,7 +697,7 @@ function fatalOutline(ctx, payload, zones, log) {
       '修好之前请不要再发。要接着用这份历史，请在插件页关掉 Ebbing Context；关掉后本对话恢复可用。'
     )
   } catch (error) {
-    // 自检本身失败时不能装作"没事"：记一条，至少日志里查得到（第六轮审查 B）。
+    // 自检本身失败时不能装作"没事"：记一条，至少日志里查得到（回归修复）。
     if (typeof log === 'function') log('fatal-outline-failed', { error: errText(error) })
     return null
   }
@@ -733,12 +733,12 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
   if (!aboveLine && st.lineOn) {
     st.lineOn = false
     // 灯灭要落盘：否则重启后 hydrate 回 true，下一次越线会被当成"还亮着"，
-    // 吞掉一次到线提醒（审查 0883a196 Major 2）。
+    // 吞掉一次到线提醒（回归修复）。
     persistGrowth(ctx, id, st, log)
   }
-  // 会话搜索没开时 compress 与 context_map 都停用：叫醒只会让模型照地图撞墙（复核 C1）。
+  // 会话搜索没开时 compress 与 context_map 都停用：叫醒只会让模型照地图撞墙（回归修复）。
   // 闸门必须放在上面两行**之后**：整个"停用 → 启用"期间占用掉到线下时，指示灯也得复位，
-  // 否则重新启用后再次越线会被当成"还亮着"，那一次到线提醒永久丢掉（复核 qwen R3）。
+  // 否则重新启用后再次越线会被当成"还亮着"，那一次到线提醒永久丢掉（回归修复）。
   // 早退时顺手把这一步之前登记的提醒作废：工具都停着，叫醒它只会吃一次拒绝。
   if (missingSessionQuery(ctx, config)) {
     if (!st.loggedSearchBlock && typeof log === 'function') {
@@ -769,13 +769,13 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     if (dropped > Math.max(1, Math.round(st.tokens * 0.05))) {
       st.zonesTurn = null
       // 「压得动」是拿同一份区快照算的：快照作废，这份判断也得跟着重算，
-      // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（复核四）。
+      // 否则会拿压缩前的"l1 还有两块可压"去给压缩后的表发提醒（回归修复）。
       st.compressTurn = null
       st.compressKeep = null
     }
   }
   // 基线比当前用量还高（宿主 /compact、剪枝、窗口变小）：grew 会长期为负，增长触发
-  // 要等用量爬回旧基线才可能再响。以当前用量为新基线重新起算（审查 0883a196 8）。
+  // 要等用量爬回旧基线才可能再响。以当前用量为新基线重新起算（回归修复）。
   // 必须放在"占用明显下降"检测**之后**：那个检测也读 st.tokens，提前改它会让压缩后的
   // 旧区快照不被作废（S2 回归测试抓到的正是这条）。
   if (typeof st.tokens === 'number' && usage.used > 0 && usage.used < st.tokens) {
@@ -797,7 +797,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     st.zonesOver = readZoneOver(session, config, usage.budget, stepZones, log)
     st.ambiguous = stepZones ? stepZones.ambiguous === true : false
   }
-  // 「哪一层现在真压得动」只在**可能真开口**时才估（复核四）：
+  // 「哪一层现在真压得动」只在**可能真开口**时才估（回归修复）：
   // 估 l0 要把整段原文逐个 token 数一遍，而到线、增长、区超限一件都没发生的那一轮，
   // 这份结果算出来只会被丢掉。先看这一轮到底有没有理由发提醒；同一轮只算一次。
   const maybeTell = onLine || onGrowth ||
@@ -838,8 +838,7 @@ function remindIfNeeded(ctx, config, state, bySignal, byAgent, payload, log, ste
     }
     // 第二步：判据本身。这里是纯计算（worthCompressing / zoneRangeCost / envBlockedOf），
     // 它抛错意味着我们的代码有 bug，不是会话坏了——记日志、本轮不叫醒，绝不因此停掉整段对话
-    // （复核 P7：这里以前置 null，而 anyCompressible/zoneNoticeAllowed 都把 null 当"乐观"，
-    //  结果是"不叫醒"的注释与"照发提醒"的行为相反）。
+    // （回归修复）。
     if (live) {
       try {
         st.ambiguous = live.ambiguous === true
@@ -995,7 +994,7 @@ function newState() {
     // 用户在这一轮的某一步插过话：只用于把"执行场景"从叫醒/到线降成 plain，
     // 不能拿它替代 autoTurn——autoTurn 还是"同一轮不再叫醒"的闸门（回归修复）。
     spokeTurn: null,
-    // 「哪一层压得动」是按轮缓存的（复核四）：只有真要发提醒的那一轮才去估 l0 成本。
+    // 「哪一层压得动」是按轮缓存的（回归修复）：只有真要发提醒的那一轮才去估 l0 成本。
     compressTurn: null,
     compressKeep: null,
     // 增长这条触发自己的两格状态（用户要求 第 2 条）：
@@ -1068,7 +1067,7 @@ function sceneOf(ctx, agent, reminded, turn) {
 // 取状态：没有就建。**建的任何一条路都要先把盘上的基线灌回来**——
 // 重启后第一次 pre-step 可能因为拿不到用量读数而提前返回，状态会被轮次标记、提醒投递
 // 这些旁路建出来；如果它们建出的空状态不 hydrate，下一次 pre-step 看到 st 已存在就跳过
-// 回灌，再把基线设成当前用量落盘，盘上的旧基线就被冲掉了（审查 0883a196 Major 1）。
+// 回灌，再把基线设成当前用量落盘，盘上的旧基线就被冲掉了（回归修复）。
 function ensureState(ctx, state, id) {
   const st = state.get(id)
   if (st) {
@@ -1119,7 +1118,7 @@ export function persistGrowth(ctx, id, st, log) {
     })
     // 落盘失败不能全静默：用户重启后发现"累计又清零了"，日志里至少得能查到原因。
     // 成功但退到了临时目录也要记：主目录里那份是旧的，只记在这里才看得出真实位置。
-    // 同一状态连续失败/连续退级只记一次，恢复后清标记——坏盘时不能每步刷一条（GLM 复核 minor 4）。
+    // 同一状态连续失败/连续退级只记一次，恢复后清标记——坏盘时不能每步刷一条（回归修复）。
     if (!ok) {
       if (typeof log === 'function' && st.stateLog !== 'fail') {
         st.stateLog = 'fail'
@@ -1162,7 +1161,7 @@ function settleGrowth(ctx, config, state, payload, log) {
   if (!st || st.growthPending === null) return
   // 提醒还挂在 inbox 的 next-turn 里没人认领（用户恰在收尾时插话、或上一轮异常收场）：
   // 这一轮不是"给它的一轮"，先别结算——否则门槛重设、基线前移，等于白送一次叫醒，
-  // 而那句提醒真正被读到时要再等一轮才有效（用户 m20198 第 1 条）。
+  // 而那句提醒真正被读到时要再等一轮才有效（设计约束）。
   // 拿不到 agent（无 id）时上面直接 return：这一轮不结算，下一轮 turn 超过 growthPending
   // 时会补结算，不会永久卡住（压缩成功路径也会清）。
   if (payload.agent && pendingNoticeOf(payload.agent)) return
@@ -1527,7 +1526,7 @@ function noticeText(ctx, config, record, count, log) {
     }
   } catch (error) {
     mapText = ''
-    // 这是全库唯一一个原本不记日志的 catch（第六轮审查 B）：读不到地图时提醒照发，
+    // 这是全库唯一一个原本不记日志的 catch（回归修复）：读不到地图时提醒照发，
     // 正文里却还写着"照下面给的位置"——必须留下痕迹，才好排查。
     if (typeof log === 'function') log('notice-map-failed', { error: errText(error) })
   }
@@ -1809,7 +1808,7 @@ function compressTool(ctx, config, log, foldQueues, reminded) {
 // 压缩成功之后把"上一次提醒时的量"重设成现在的量。
 // 不重设的话：基线停在压缩前的高位，压缩后 grew 长期为负，增长触发那个条件
 // 要等用量一路爬回压缩前的高度才可能再响——等于把三个触发条件里的一个废掉。
-// 导出是为了让测试直接钉住"先复位指示灯、再落盘"的顺序（审查 0883a196 Major 2）。
+// 导出是为了让测试直接钉住"先复位指示灯、再落盘"的顺序（回归修复）。
 export function resetGrowthBaseline(ctx, agent, config, state, log) {
   try {
     const st = state.get(agent.id)
@@ -1838,7 +1837,7 @@ export function resetGrowthBaseline(ctx, agent, config, state, log) {
     // 与地图/pre-step 用同一个 keepTurnsState().auto，避免第三套“到线”表达式在退化读数下分叉。
     if (usage) st.lineOn = keepTurnsState(config, usage).auto
     // 落盘必须放在指示灯复位**之后**：以前先落盘再复位，盘上留的是压缩前的 lineOn，
-    // 重启后会吞掉一次到线提醒（审查 0883a196 Major 2）。
+    // 重启后会吞掉一次到线提醒（回归修复）。
     persistGrowth(ctx, agent.id, st, log)
   } catch {}
 }
@@ -2119,7 +2118,7 @@ export function mergeConfig(raw) {
   const copy = raw && typeof raw === "object" ? { ...raw } : {}
   if (copy.notice && typeof copy.notice === "object" && !Array.isArray(copy.notice)) copy.notice = { ...copy.notice }
   const source = migrateConfig(copy)
-  // 迁移必须发生在**运行时这条路**上（第四轮审查 D1）：validateConfig 拿到的是一份解引用副本，
+  // 迁移必须发生在**运行时这条路**上（回归修复）：validateConfig 拿到的是一份解引用副本，
   // 在副本上删旧键、填新键不会回流到宿主那份 raw；真正生效的是 mergeConfig 每次现读的这份。
   const merged = {
     ...DEFAULTS,
@@ -2129,7 +2128,7 @@ export function mergeConfig(raw) {
     notice: { ...DEFAULTS.notice, ...(source.notice || {}) },
     title: { ...DEFAULTS.title, ...(source.title || {}) },
   }
-  // keepTurns 的取整与兜底必须落在**运行时出口**（复核二 B2）：`validateConfig` 收到的是
+  // keepTurns 的取整与兜底必须落在**运行时出口**（回归修复）：`validateConfig` 收到的是
   // `unwrapVolatile` 造出来的副本，改那个副本不会回流到 raw；而地图与判轮读的是这里。
   // 用户 2026-11-05 定：面板 min=1 拦正常输入，插件侧兜底夹到 1..50——不再每轮抛红停用。
   // 类型错（字符串/布尔/对象）在 validateConfig 已经报错；这里只对数字做夹取，

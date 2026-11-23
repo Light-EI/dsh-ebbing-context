@@ -114,7 +114,7 @@ if (DEFAULTS.title.maxTokens !== 50 || 'lang' in DEFAULTS.title) {
 
 
 
-// 第四轮审查 D1：迁移必须在运行时出口生效。
+// 回归修复：迁移必须在运行时出口生效。
 // 宿主把 volatile 叶子按默认值预置好（新键永远有值），所以判据只能是“旧键在不在”；
 // 而且 validateConfig 改的是解引用副本，真正生效的是 mergeConfig 每次现读的那份。
 const runtimeMigrated = mergeConfig({ notice: { forgivePct: 70, growthResetPct: DEFAULTS.notice.growthResetPct } })
@@ -137,7 +137,7 @@ try {
   console.error("FAIL 老配置 forgivePct 让插件拒绝启动：" + error.message)
   failed += 1
 }
-// keepTurns 取整必须发生在运行时出口（复核二 B2）：`validateConfig` 改的是解引用后的副本，
+// keepTurns 取整必须发生在运行时出口（回归修复）：`validateConfig` 改的是解引用后的副本，
 // 插件真正读的是 `mergeConfig(raw)` 的结果——那里不取整，地图就会写出 `to=T3.5` 这种解析不了的号。
 {
   const merged = mergeConfig({ keepTurns: 1.5 })
@@ -162,7 +162,7 @@ pass0: {
   if (normal.keepTurns !== 3) throw new Error('正常值不该被改，实际 ' + JSON.stringify(normal.keepTurns))
 }
 
-// 类型不对是"配置有错"，必须拒绝启动——不能悄悄花成默认值（设计意图复核 P6：
+// 类型不对是"配置有错"，必须拒绝启动——不能悄悄花成默认值（设计意图回归修复：
 // 曾经用 Number() 强转，"abc" 会静默变成默认的 2，而 validateConfig 一条错都不报）。
 reject('keepTurns 写成字符串', { keepTurns: 'abc' }, 'keepTurns')
 reject('keepTurns 写成布尔', { keepTurns: true }, 'keepTurns')

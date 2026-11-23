@@ -162,7 +162,7 @@ try {
   utimesSync(tmpFileOf(tieId), later, later)
   check('updatedAt 并列时按文件 mtime 取更新的那份', readGrowth(tieId) && readGrowth(tieId).tokens === 22, JSON.stringify(readGrowth(tieId)))
 
-  // 去重的状态切换：失败 → 退临时目录 → 恢复正常 → 再失败，每次切换记一条（复核 minor）
+  // 去重的状态切换：失败 → 退临时目录 → 恢复正常 → 再失败，每次切换记一条（回归修复）
   {
     const transId = `${uniq}-trans`
     const transSt = { tokens: 1, growthQuota: null, lineOn: false }
@@ -198,7 +198,7 @@ try {
     rmSync(tmpFileOf(transId), { force: true })
   }
 
-  // ⑥ resetGrowthBaseline：先按压缩后比例复位指示灯、再落盘（审查 Major 2）
+  // ⑥ resetGrowthBaseline：先按压缩后比例复位指示灯、再落盘（回归修复）
   const usageSession = {
     id: 'session-reset',
     seq: 1,

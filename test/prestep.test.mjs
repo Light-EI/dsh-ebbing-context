@@ -192,7 +192,7 @@ function lineSession(used = 3600) {
 
 function usageCtx(session) {
   const ctx = fakeCtx(session)
-  // 会话搜索必须装着：提醒现在走同一道闸门（复核 C1），没装就不叫醒。
+  // 会话搜索必须装着：提醒现在走同一道闸门（回归修复），没装就不叫醒。
   ctx.tools = { register: () => () => {}, get: (name) => (name === 'session_event_read' || name === 'session_event_search' ? {} : undefined) }
   ctx.tokenMeter = { measure: () => ({ totalTokens: session.used }) }
   return ctx
@@ -1595,9 +1595,9 @@ await check('区超限与增长同一轮都成立：合并成一条提醒，不�
   assert.match(text, /允许什么都不压/, '每条提醒都要写明可以不压')
 })
 
-// —— 增长状态落盘：重启不清零（审查 0883a196 Major 1/3）——
+// —— 增长状态落盘：重启不清零（回归修复/3）——
 // 这三条必须真跑 pre-step，并且给假会话安上 id、把 DSH_HOME 指到临时目录：
-// 只测 hydrateGrowth/persistGrowth 两个函数钉不住"接线漏了"——审查实测删掉
+// 只测 hydrateGrowth/persistGrowth 两个函数钉不住"接线漏了"——回归修复实测删掉
 // remindIfNeeded 里的 hydrate 调用，旧的 state 17 项 + prestep 59 项仍然全绿。
 
 const scratchHome = () => mkdtempSync(join(tmpdir(), 'ebbing-prestep-state-'))
@@ -1852,7 +1852,7 @@ await check('用量瞬时归零不把基线压成 0（防下一步凭空报增�
 
 
 await check('轮次大纲缺一轮：不再打红（夹住上界即可，fork/迁移的会话照常可用）', async () => {
-  // 复核 A1 + 用户 m20995：缺一轮的边界确实不可知，但那是宿主恢复留下的正常痕迹。
+  // 回归修复 + 设计约束：缺一轮的边界确实不可知，但那是宿主恢复留下的正常痕迹。
   // 现在的做法是把可压上界夹到缺轮之前，而不是让整条对话永久停摆。
   const messages = [
     { role: 'user', content: [{ type: 'text', text: 'a' }] },
@@ -2144,7 +2144,7 @@ await check('每步只扫一遍表层（三个用途共用同一份，不再各�
   assert.ok(bothSteps - firstStep <= 1, '第二步也最多一次，实际多了 ' + (bothSteps - firstStep) + ' 次')
 })
 
-// 超窗口（用户 m20198 第 2 条）：宿主自带压缩默认开着，它会在同一条 request-error 上
+// 超窗口（设计约束）：宿主自带压缩默认开着，它会在同一条 request-error 上
 // 自己救一次并 retry。第一次就宣布"没救"是假话，所以第一次只给中性提示、不动自动续作；
 // 连着第二次还超，才认死并缴械。
 await check('超窗口：第一次只给中性提示、不动自动续作；连着第二次才缴械', async () => {
@@ -2210,7 +2210,7 @@ await check('超窗口：中间成功收尾过一轮，计数清零（重新从"
 })
 
 // 静默子代理（notifySubagents=false）收尾时插件早退，但超窗计数必须照样清零——
-// 否则它自愈一次之后再超一次，就会被误判成"连着两轮"并缴掉它的自动续作（复核 0.1.16 B1）。
+// 否则它自愈一次之后再超一次，就会被误判成"连着两轮"并缴掉它的自动续作（回归修复）。
 await check('超窗口：静默子代理收尾也会清零，不会把两次隔轮超窗算成"连着两轮"', async () => {
   const session = usageSession(100)
   const ctx = usageCtx(session)
@@ -2432,7 +2432,7 @@ await check('R3 回归：停用会话搜索期间占用掉到线下，指示灯�
   const t5 = STEP(5, 1)
   await ctx.handlers.get('agent/pre-step')(t5, () => {})
   await ctx.handlers.get('agent/turn-stopping')({ turn: 5, signal: t5.signal })
-  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '停用期间掉下线的复位丢了 → 这里就永远不报（复核 qwen R3）')
+  assert.equal(onlyKind(session, NOTICE_KIND).length, 2, '停用期间掉下线的复位丢了 → 这里就永远不报（回归修复）')
   assert.match(String(onlyKind(session, NOTICE_KIND)[1].data.content[0].text), /上下文/, '发的应该还是到线提醒')
 })
 await check('没装会话搜索插件：不写提醒（地图、工具与到线 inline 都停用）', async () => {
@@ -2654,7 +2654,7 @@ await check('compress 描述开头形状 + schema 顺序：to 在层对象里、
   // ② 运行结论先给结果，过程性记录挪位但不删；归属类事实保留；
   // ③ 时间边界：旧块不写压缩时的现状；
   // ④ 合并旧摘要块时不能只并标题；
-  // ⑤ 领域通用：不写“改了什么文件/跑了什么命令/agent 名/审查轮次/提交号”这类模板；
+  // ⑤ 领域通用：不写“改了什么文件/跑了什么命令/agent 名/回归修复轮次/提交号”这类模板；
   // ⑥ 明确禁止“写完自查/重写”类措辞，避免模型以为要二次压缩。
   assert.match(summary, /重要结论/, '要明确要求重要结论')
   assert.match(summary, /确认的事实/, '要明确要求确认的事实')
@@ -2667,7 +2667,7 @@ await check('compress 描述开头形状 + schema 顺序：to 在层对象里、
   assert.match(summary, /压缩时才看到的现状不属于旧块的结论/, '时间边界要写进提示词')
   assert.match(summary, /不能只并标题/, '合并旧块不能只抄标题')
   assert.match(summary, /不能只写“已完成\/已通过”/, '要防止空泛结论')
-  assert.doesNotMatch(summary, /改了什么文件|跑了什么命令|agent 名|审查轮次|提交号/, '摘要规则不能绑定编程/代理流程模板')
+  assert.doesNotMatch(summary, /改了什么文件|跑了什么命令|agent 名|回归修复轮次|提交号/, '摘要规则不能绑定编程/代理流程模板')
   assert.doesNotMatch(summary, /自查|逐项检查|写完.*检查|再写一版|重写一遍/, '不许让模型以为要写两遍/二次检查')
   assert.match(l0Summary, /同 l3 的 summary 规则：四行——/, '一行引用要指得回 l3')
   assert.match(l0Summary, /删过程流水但保留决策依据、失败原因与关键数据/, '一行引用口径要与 l3 一致')
